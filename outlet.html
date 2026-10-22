@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>SIPS Outlet</title>
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#1F3D32">
+<link rel="icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800;900&family=Figtree:wght@400;500;600;700&family=Dancing+Script:wght@600&family=Courier+Prime:wght@400;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="outlet">
+<header class="band">
+  <div class="wrap">
+    <img class="logo" src="logo.png" alt="SIPS Barley &amp; Comfort">
+    <span class="tag">Dashboard Outlet</span>
+    <span id="who" class="who-chip" hidden></span>
+  </div>
+</header>
+<div class="banner" id="banner" hidden><div class="wrap" id="bannerText"></div></div>
+
+<main id="login" class="wrap" hidden>
+  <form class="login-card" id="loginForm" novalidate>
+    <h1>Log masuk staff</h1>
+    <p class="sub" id="loginSub">Hanya staff SIPS boleh lihat order pelanggan.</p>
+    <label class="field"><span>Emel</span><input type="text" id="lEmail" autocomplete="username" inputmode="email" placeholder="staff@sips.my"></label>
+    <label class="field"><span>Kata laluan</span><input type="password" id="lPw" autocomplete="current-password"></label>
+    <div class="err" id="lErr" hidden></div>
+    <button class="btn" id="lBtn" style="width:100%;margin-top:16px">Log masuk</button>
+  </form>
+</main>
+<main id="view-outlet" class="wrap" hidden></main>
+<div id="modal"></div>
+<div class="toast" id="toast" hidden></div>
+<div id="printArea" aria-hidden="true"></div>
+
+<script type="module">
+import { OUTLET } from "./config.js";
+import { LIVE, today, staffWatch, staffLogin, staffLogout, watchOrders, updateOrder, deleteOrder } from "./data.js";
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const rm = n => "RM" + (Math.round(n * 100) / 100).toFixed(2);
+const tm = t => new Date(t).toLocaleTimeString("ms-MY", { hour: "2-digit", minute: "2-digit", hour12: false });
+const pad3 = n => String(n).padStart(3, "0");
+const ls = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} } };
+
+if (!LIVE) { $("#banner").hidden = false; $("#bannerText").innerHTML = "<span><b>Mod demo.</b> Kata laluan: <b>1234</b>. Order dari index.html dalam browser yang sama akan muncul di sini.</span>"; }
+
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 2600); }
+function closeModal() { $("#modal").innerHTML = ""; document.body.style.overflow = ""; }
+function openModal(html, onMount) {
+  $("#modal").innerHTML = `<div class="scrim" id="scrim"><div class="sheet" role="dialog" aria-modal="true">${html}</div></div>`;
+  document.body.style.overflow = "hidden";
+  $("#scrim").addEventListener("click", e => { if (e.target.id === "scrim") nextDocket(); });
+  onMount && onMount();
+}
+
+/* ---------- LOGIN ---------- */
+let started = false;
+$("#loginForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  $("#lErr").hidden = true; $("#lBtn").disabled = true; $("#lBtn").textContent = "Sedang log masuk…";
+  try { await staffLogin($("#lEmail").value.trim(), $("#lPw").value); if (!LIVE) location.reload(); }
+  catch (err) { $("#lErr").textContent = err.message; $("#lErr").hidden = false; }
+  $("#lBtn").disabled = false; $("#lBtn").textContent = "Log masuk";
+});
+
+/* ---------- DASHBOARD ---------- */
+let orders = [], seen = null, sound = false, autoPrint = ls.get("sips.autoprint", false), audioCtx = null, histOpen = false, confirmClear = false, day = today(), unsub = null;
+
+function chime() {
+  if (!sound) return;
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    [880, 1175, 1568].forEach((f, i) => {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain(); o.type = "sine"; o.frequency.value = f;
+      const t = audioCtx.currentTime + i * .16; g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(.3, t + .02); g.gain.exponentialRampToValueAtTime(.001, t + .35);
+      o.connect(g).connect(audioCtx.destination); o.start(t); o.stop(t + .4);
+    });
+  } catch (e) {}
+}
+setInterval(() => { if (orders.some(o => o.status === "new")) chime(); }, 12000);
+let wl = null; async function keepAwake() { try { if (!wl && navigator.wakeLock) { wl = await navigator.wakeLock.request("screen"); wl.addEventListener("release", () => wl = null); } } catch (e) {} }
+document.addEventListener("visibilitychange", () => { if (!document.hidden) keepAwake(); });
+
+async function subscribe() {
+  unsub && unsub(); seen = null;
+  unsub = await watchOrders(day, (list, err) => {
+    if (!list) { toast("Sambungan ke server terputus. Muat semula page."); return; }
+    const fresh = seen ? list.filter(o => !seen.has(o.id) && o.status === "new") : [];
+    seen = new Set(list.map(o => o.id)); orders = list;
+    if (fresh.length) {
+      chime(); toast(`Order baru #${pad3(fresh[0].no)} masuk`);
+      document.title = `(${orders.filter(o => o.status === "new").length}) SIPS Outlet`;
+      fresh.sort((a, b) => a.createdAt - b.createdAt).forEach(o => autoPrint ? queueDocket(o, true) : null);
+    }
+    render();
+  });
+}
+function start() {
+  keepAwake(); subscribe();
+  setInterval(() => { if (today() !== day) { day = today(); subscribe(); } else if (!$("#modal").innerHTML) render(); }, 30000);
+}
+function ago(t) { const m = Math.floor((Date.now() - t) / 60000); return m < 1 ? "baru tadi" : m < 60 ? m + " min lalu" : tm(t); }
+
+function render() {
+  const by = s => orders.filter(o => o.status === s).sort((a, b) => a.createdAt - b.createdAt);
+  const nNew = by("new").length;
+  document.title = nNew ? `(${nNew}) SIPS Outlet` : "SIPS Outlet";
+  const sales = orders.filter(o => o.status !== "cancel").reduce((s, o) => s + o.total, 0);
+  const lane = (s, title, emptyMsg) => { const L = by(s); return `<section class="lane"><h2 style="color:var(--${s})">${title}<span class="c num">${L.length}</span></h2>${L.length ? L.map(ticket).join("") : `<div class="empty">${emptyMsg}</div>`}</section>`; };
+  const done = orders.filter(o => o.status === "done" || o.status === "cancel").sort((a, b) => b.createdAt - a.createdAt);
+  const base = location.href.replace(/outlet\.html.*$/, "");
+  $("#view-outlet").innerHTML = `
+    <div class="toolbar"><h1>${esc(OUTLET.branch)}</h1>
+      <button class="tgl" id="tSound" aria-pressed="${sound}"><i></i>Bunyi alert ${sound ? "ON" : "OFF"}</button>
+      <button class="tgl" id="tAuto" aria-pressed="${autoPrint}"><i></i>Auto print docket ${autoPrint ? "ON" : "OFF"}</button></div>
+    <div class="stats">
+      <div class="stat"><b class="num" style="color:var(--new)">${nNew}</b><span>Order baru</span></div>
+      <div class="stat"><b class="num">${by("prep").length}</b><span>Sedang disediakan</span></div>
+      <div class="stat"><b class="num">${orders.filter(o => o.status !== "cancel").length}</b><span>Order hari ini</span></div>
+      <div class="stat"><b class="num">${rm(sales)}</b><span>Jualan hari ini</span></div></div>
+    <div class="lanes">
+      ${lane("new", "Baru", "Tiada order baru. Order pelanggan akan muncul di sini dengan bunyi alert.")}
+      ${lane("prep", "Disediakan", "Tekan “Terima & print” pada order baru untuk mula sediakan.")}
+      ${lane("ready", "Siap diambil", "Order yang dah siap akan tunggu di sini.")}
+    </div>
+    <details class="hist" id="hist" ${histOpen ? "open" : ""}><summary>Selesai &amp; batal hari ini (${done.length})</summary>
+      <div class="htable">${done.length ? `<table><thead><tr><th>No</th><th>Masa</th><th>Nama</th><th>Item</th><th>Jumlah</th><th>Status</th></tr></thead><tbody>
+      ${done.map(o => `<tr><td class="num">#${pad3(o.no)}</td><td class="num">${tm(o.createdAt)}</td><td>${esc(o.name)}</td><td>${o.items.reduce((s, i) => s + i.qty, 0)}</td><td class="num">${rm(o.total)}</td><td>${o.status === "done" ? "Selesai" : "Batal"}</td></tr>`).join("")}
+      </tbody></table>` : `<p style="color:var(--muted)">Belum ada.</p>`}</div>
+      <div class="danger">${confirmClear ? `<span>Padam semua order hari ini? Tak boleh undo.</span><button class="btn" style="background:var(--new);color:#fff" id="clrYes">Ya, padam</button><button class="btn ghost" id="clrNo">Batal</button>` : `<button class="btn ghost" id="clr">Kosongkan order hari ini</button>`}</div>
+    </details>
+    <details class="hist"><summary>Link &amp; QR untuk pelanggan</summary>
+      <p style="font-size:14px">Link menu pelanggan: <span class="linkbox"><code id="lnk">${esc(base)}</code><button class="btn ghost" id="cp" style="padding:4px 10px">Salin</button></span></p>
+      <p style="font-size:14px">Jadikan link ini QR untuk ditampal di kaunter, banner dan bungkusan.</p>
+    </details>`;
+  $("#hist").ontoggle = () => histOpen = $("#hist").open;
+  $("#tSound").onclick = () => { sound = !sound; chime(); render(); };
+  $("#tAuto").onclick = () => { autoPrint = !autoPrint; ls.set("sips.autoprint", autoPrint); render(); };
+  const c = $("#clr"); if (c) c.onclick = () => { confirmClear = true; histOpen = true; render(); };
+  const n = $("#clrNo"); if (n) n.onclick = () => { confirmClear = false; render(); };
+  const y = $("#clrYes"); if (y) y.onclick = async () => { confirmClear = false; for (const o of [...orders]) await deleteOrder(o.id).catch(() => {}); toast("Order hari ini dikosongkan"); };
+  $("#cp").onclick = async () => { try { await navigator.clipboard.writeText($("#lnk").textContent); toast("Link disalin"); } catch (e) { toast("Tekan lama pada link untuk salin."); } };
+  document.querySelectorAll("[data-act]").forEach(b => b.onclick = () => act(b.dataset.id, b.dataset.act));
+}
+function ticket(o) {
+  const btns = {
+    new: `<button class="x" data-act="cancel" data-id="${o.id}">Batal</button><button data-act="docket" data-id="${o.id}">Docket</button><button class="go" data-act="accept" data-id="${o.id}">Terima &amp; print</button>`,
+    prep: `<button data-act="docket" data-id="${o.id}">Print semula</button><button class="go" data-act="ready" data-id="${o.id}">Siap</button>`,
+    ready: `<button data-act="back" data-id="${o.id}">Undur</button><button class="go" data-act="done" data-id="${o.id}">Dah diambil</button>`
+  }[o.status] || "";
+  return `<article class="ticket s-${o.status}">
+    <div class="hd"><span class="no num">#${pad3(o.no)}</span><span class="pill ${o.type}">Takeaway</span>${o.printed ? `<span class="printed">✓ print ${o.printed}×</span>` : ""}<span class="time num">${tm(o.createdAt)} · ${ago(o.createdAt)}</span></div>
+    ${o.name || o.phone ? `<div class="who" style="font-weight:700;color:var(--fg)">${esc(o.name)}${o.phone ? " · " + esc(o.phone) : ""}</div>` : ""}
+    <ul>${o.items.map(i => `<li><b class="num">${i.qty}×</b><span>${esc(i.name)}</span>${i.opts.length || i.note ? `<small>${esc(i.opts.join(" · "))}${i.note ? ` · <b style="color:var(--new)">${esc(i.note)}</b>` : ""}</small>` : ""}</li>`).join("")}</ul>
+    <div class="ft"><span class="tot num">${rm(o.total)}</span>${btns}</div></article>`;
+}
+async function act(id, a) {
+  const o = orders.find(x => x.id === id); if (!o) return;
+  try {
+    if (a === "accept") { await updateOrder(id, { status: "prep", prepAt: Date.now() }); queueDocket(o, true); }
+    else if (a === "docket") queueDocket(o, false);
+    else if (a === "ready") await updateOrder(id, { status: "ready", readyAt: Date.now() });
+    else if (a === "back") await updateOrder(id, { status: "prep" });
+    else if (a === "done") await updateOrder(id, { status: "done", doneAt: Date.now() });
+    else if (a === "cancel") await updateOrder(id, { status: "cancel", cancelAt: Date.now() });
+  } catch (e) { toast("Tak berjaya kemaskini. Cuba lagi."); }
+}
+
+/* ---------- DOCKET DAPUR 80mm ---------- */
+const W = 42;
+const padLR = (l, r) => { l = String(l); r = String(r); return l + " ".repeat(Math.max(1, W - l.length - r.length)) + r; };
+const center = s => " ".repeat(Math.max(0, Math.floor((W - s.length) / 2))) + s;
+const wrapTxt = (s, ind) => { const out = []; let line = ""; s.split(" ").forEach(w => { if ((line + " " + w).trim().length > W - ind) { out.push(line); line = w; } else line = (line + " " + w).trim(); }); if (line) out.push(line); return out.map(x => " ".repeat(ind) + x); };
+function docketText(o) {
+  const L = [], hr = "-".repeat(W);
+  L.push(center(OUTLET.name.toUpperCase() + " - DOCKET DAPUR"), hr);
+  L.push(padLR("ORDER #" + pad3(o.no), "TAKEAWAY"));
+  L.push(padLR(new Date(o.createdAt).toLocaleDateString("ms-MY"), tm(o.createdAt)));
+  if (o.name) L.push("Nama: " + o.name + (o.phone ? "  " + o.phone : ""));
+  L.push(hr);
+  const sec = (t, arr) => { if (!arr.length) return; L.push("[" + t + "]"); arr.forEach(i => { wrapTxt(i.qty + "x " + i.name.toUpperCase(), 0).forEach(x => L.push(x)); if (i.opts.length) wrapTxt(i.opts.join(", "), 4).forEach(x => L.push(x)); if (i.note) wrapTxt("** " + i.note, 4).forEach(x => L.push(x)); }); L.push(""); };
+  sec("MINUMAN", o.items.filter(i => !i.food)); sec("MAKANAN", o.items.filter(i => i.food));
+  L.push(hr, padLR("Jumlah item: " + o.items.reduce((s, i) => s + i.qty, 0), "Cetak " + tm(Date.now())));
+  return L.join("\n");
+}
+function docketHTML(o) { return `<div class="x2">#${pad3(o.no)}  T/AWAY</div>${esc(docketText(o))}`; }
+
+let queue = [];
+function queueDocket(o, print) {
+  if (queue.some(q => q.o.id === o.id)) return;
+  queue.push({ o, print });
+  if (!$("#modal").innerHTML) nextDocket(true);
+}
+function nextDocket(fromQueue) {
+  if (!fromQueue) { closeModal(); }
+  const item = queue.shift(); if (!item) { closeModal(); return; }
+  const { o, print } = item;
+  openModal(`<h2>Docket dapur #${pad3(o.no)}</h2>
+    <div class="sub">Kertas thermal 80mm.</div>
+    <div class="docket-wrap"><div class="paper">${docketHTML(o)}</div></div>
+    <div class="sheet-foot" style="flex-wrap:wrap"><button class="btn ghost" id="dClose">Tutup</button><button class="btn wide" id="dPrint"><span>Print docket</span><span>⎙</span></button></div>`,
+  () => {
+    $("#dClose").onclick = () => nextDocket();
+    $("#dPrint").onclick = () => doPrint(o);
+    if (print) setTimeout(() => doPrint(o), 300);
+  });
+}
+async function doPrint(o) {
+  $("#printArea").innerHTML = `<div class="paper print">${docketHTML(o)}</div>`;
+  window.print();
+  const cur = orders.find(x => x.id === o.id);
+  updateOrder(o.id, { printed: (cur?.printed || 0) + 1 }).catch(() => {});
+  setTimeout(() => nextDocket(), 400);
+}
+staffWatch((staff, reason) => {
+  if (!staff) {
+    $("#login").hidden = false; $("#view-outlet").hidden = true; $("#who").hidden = true;
+    if (reason) { $("#lErr").textContent = reason; $("#lErr").hidden = false; }
+    return;
+  }
+  $("#login").hidden = true; $("#view-outlet").hidden = false;
+  $("#who").hidden = false; $("#who").innerHTML = `${esc(staff.email)} <button id="logout">Log keluar</button>`;
+  $("#logout").onclick = () => staffLogout();
+  if (!started) { started = true; start(); }
+});
+</script>
+</body>
+</html>

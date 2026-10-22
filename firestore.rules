@@ -1,0 +1,56 @@
+rules_version = '2';
+// SIPS Order — peraturan keselamatan Firestore
+// Customer : boleh HANTAR order & baca order SENDIRI sahaja.
+// Staff    : (emel ada dalam koleksi "staff") boleh baca & urus semua order.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isStaff() {
+      return signedIn()
+        && request.auth.token.email != null
+        && exists(/databases/$(database)/documents/staff/$(request.auth.token.email));
+    }
+
+    match /orders/{orderId} {
+      allow create: if signedIn()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.status == 'new'
+        && request.resource.data.printed == 0
+        && request.resource.data.ts == request.time
+        && request.resource.data.total is number
+        && request.resource.data.items is list
+        && request.resource.data.items.size() > 0
+        && request.resource.data.items.size() <= 40
+        && request.resource.data.type == 'take'
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 30
+        && request.resource.data.no == getAfter(/databases/$(database)/documents/meta/counter).data.n;
+
+      // Customer baca order sendiri sahaja; staff baca semua
+      allow get: if isStaff() || (signedIn() && resource.data.uid == request.auth.uid);
+      allow list: if isStaff();
+
+      // Hanya staff boleh tukar status / padam
+      allow update, delete: if isStaff();
+    }
+
+    // Nombor giliran harian — hanya boleh naik 1, atau reset ke 1 bila hari bertukar
+    match /meta/counter {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.n == 1;
+      allow update: if signedIn() && (
+        (request.resource.data.day == resource.data.day && request.resource.data.n == resource.data.n + 1)
+        || (request.resource.data.day != resource.data.day && request.resource.data.n == 1)
+        || isStaff()
+      );
+    }
+
+    // Senarai staff — diurus dari Firebase Console sahaja
+    match /staff/{email} {
+      allow read: if signedIn() && request.auth.token.email == email;
+      allow write: if false;
+    }
+  }
+}
