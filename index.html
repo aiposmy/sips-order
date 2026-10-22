@@ -17,6 +17,7 @@
   <div class="wrap">
     <img class="logo" src="logo.png" alt="SIPS Barley &amp; Comfort">
     <span class="tag">Goodness in Every Sip.</span>
+    <button class="acct" id="acctBtn" hidden>Log masuk</button>
   </div>
 </header>
 <div class="banner" id="banner" hidden><div class="wrap" id="bannerText"></div></div>
@@ -27,13 +28,17 @@
 <div class="toast" id="toast" hidden></div>
 
 <script type="module">
-import { MENU } from "./config.js";
-import { LIVE, customerInit, createOrder, watchMyOrder } from "./data.js";
+import { MENU, LOYALTY } from "./config.js";
+import { LIVE, pointsFor, customerInit, onCustomerAuth, createOrder, watchMyOrder, watchMyOrders,
+  signUpEmail, signInEmail, signInGoogle, resetPassword, signOutCustomer, watchMember, updateProfile, redeemReward } from "./data.js";
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const rm = n => "RM" + (Math.round(n * 100) / 100).toFixed(2);
+const r2 = n => Math.round(n * 100) / 100;
+const pad3 = n => String(n).padStart(3, "0");
 const ls = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} } };
+const dt = t => new Date(t).toLocaleDateString("ms-MY", { day: "numeric", month: "short" });
 
 if (!LIVE) { $("#banner").hidden = false; $("#bannerText").innerHTML = "<span><b>Mod demo.</b> Order disimpan dalam browser ini sahaja. Buka <b>outlet.html</b> dalam tab lain untuk lihat order masuk.</span>"; }
 if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
@@ -46,12 +51,15 @@ function art(it) {
 
 /* ---------- state ---------- */
 let cat = "all", cart = ls.get("sips.cart", []), myOrder = ls.get("sips.myorder", null), myOrderData = null, unwatch = null;
-const orderType = "take"; let custName = ls.get("sips.name", ""), custPhone = "";
+let custName = ls.get("sips.name", ""), custPhone = ls.get("sips.phone", "");
+let user = null, member = null, unMember = null, chosenVoucher = null;
 const saveCart = () => ls.set("sips.cart", cart);
-const cartTotal = () => cart.reduce((s, l) => s + l.unit * l.qty, 0);
+const cartTotal = () => r2(cart.reduce((s, l) => s + l.unit * l.qty, 0));
 const cartQty = () => cart.reduce((s, l) => s + l.qty, 0);
+const isMember = () => !!(user && user.member && member);
+const activeVouchers = () => (member?.vouchers || []).filter(v => v.status === "active").sort((a, b) => b.value - a.value);
 
-function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 2600); }
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 2800); }
 function closeModal() { $("#modal").innerHTML = ""; document.body.style.overflow = ""; }
 function openModal(draw) {
   $("#modal").innerHTML = `<div class="scrim" id="scrim"><div class="sheet" role="dialog" aria-modal="true"></div></div>`;
@@ -61,7 +69,139 @@ function openModal(draw) {
 }
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
 
+/* ---------- akaun ---------- */
+onCustomerAuth(async u => {
+  user = u;
+  unMember && unMember(); unMember = null; member = null;
+  if (u && u.member) {
+    unMember = await watchMember(u.uid, m => {
+      member = m;
+      if (m) { if (!custName) custName = m.name || ""; if (!custPhone) custPhone = m.phone || ""; }
+      paintAcct(); if (!$("#modal").innerHTML) render();
+    });
+  }
+  paintAcct(); if (!$("#modal").innerHTML) render();
+});
+function paintAcct() {
+  const b = $("#acctBtn"); b.hidden = false;
+  if (isMember()) b.innerHTML = `<span class="star">★</span> <span class="num">${member.points}</span> point`;
+  else b.textContent = "Daftar / Log masuk";
+}
+$("#acctBtn").onclick = () => isMember() ? openAccount() : openAuth("daftar");
+
+function openAuth(tab, after) {
+  let err = "", info = "", busy = false;
+  const f = { name: custName, phone: custPhone, email: "", pw: "" };
+  openModal(function draw(sh) {
+    const w = LOYALTY.welcome;
+    sh.innerHTML = `
+      <h2>${tab === "daftar" ? "Jadi ahli SIPS" : "Log masuk ahli"}</h2>
+      <div class="sub">${tab === "daftar" ? `Percuma. Terus dapat <b>${esc(w.title)}</b> dan kumpul ${LOYALTY.pointsPerRM} point untuk setiap RM1.` : "Selamat kembali! Point dan voucher anda menunggu."}</div>
+      <div class="seg tabs"><button data-tab="daftar" aria-pressed="${tab === "daftar"}">Daftar</button><button data-tab="masuk" aria-pressed="${tab === "masuk"}">Log masuk</button></div>
+      <button class="btn google" id="gBtn" ${busy ? "disabled" : ""}><svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg> Teruskan dengan Google</button>
+      <div class="or"><span>atau guna emel</span></div>
+      ${tab === "daftar" ? `
+        <label class="field"><span>Nama</span><input type="text" id="aName" maxlength="30" autocomplete="name" value="${esc(f.name)}"></label>
+        <label class="field"><span>No. telefon</span><input type="tel" id="aPhone" maxlength="15" autocomplete="tel" placeholder="01x-xxxxxxx" value="${esc(f.phone)}"></label>` : ""}
+      <label class="field"><span>Emel</span><input type="email" id="aEmail" autocomplete="email" value="${esc(f.email)}"></label>
+      <label class="field"><span>Kata laluan</span><input type="password" id="aPw" autocomplete="${tab === "daftar" ? "new-password" : "current-password"}" placeholder="${tab === "daftar" ? "Sekurang-kurangnya 6 aksara" : ""}"></label>
+      ${tab === "masuk" ? `<button class="linkish" id="forgot">Lupa kata laluan?</button>` : ""}
+      ${err ? `<div class="err">${esc(err)}</div>` : ""}${info ? `<div class="ok">${esc(info)}</div>` : ""}
+      <div class="sheet-foot"><button class="btn ghost" id="aClose">Tutup</button><button class="btn wide" id="aGo" ${busy ? "disabled" : ""}><span>${busy ? "Sebentar…" : tab === "daftar" ? "Daftar & dapat voucher" : "Log masuk"}</span><span>→</span></button></div>
+      <p class="fine">Dengan mendaftar, anda setuju maklumat anda digunakan untuk urusan order dan program ahli SIPS sahaja.</p>`;
+    const keep = () => { ["Name", "Phone", "Email"].forEach(k => { const el = $("#a" + k); if (el) f[k.toLowerCase()] = el.value.trim(); }); f.pw = $("#aPw").value; };
+    const done = msg => { closeModal(); toast(msg); after ? after() : render(); };
+    sh.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => { keep(); tab = b.dataset.tab; err = info = ""; draw(sh); });
+    $("#aClose").onclick = () => { closeModal(); after ? after() : render(); };
+    $("#gBtn").onclick = async () => {
+      keep(); busy = true; err = ""; draw(sh);
+      try { await signInGoogle(); done("Selamat datang ke SIPS!"); } catch (e) { busy = false; err = e.message; draw(sh); }
+    };
+    const fg = $("#forgot"); if (fg) fg.onclick = async () => {
+      keep(); if (!f.email) { err = "Isi emel dulu, kemudian tekan Lupa kata laluan."; draw(sh); return; }
+      try { await resetPassword(f.email); err = ""; info = "Link tetapan semula dah dihantar ke emel anda."; } catch (e) { err = e.message; } draw(sh);
+    };
+    $("#aGo").onclick = async () => {
+      keep(); err = info = "";
+      if (tab === "daftar" && !f.name) { err = "Sila isi nama."; draw(sh); return; }
+      if (!f.email || !f.pw) { err = "Sila isi emel dan kata laluan."; draw(sh); return; }
+      busy = true; draw(sh);
+      try {
+        if (tab === "daftar") { await signUpEmail(f); custName = f.name; custPhone = f.phone; done(`Berjaya! ${LOYALTY.welcome.title} dah masuk akaun anda.`); }
+        else { await signInEmail(f.email, f.pw); done("Selamat kembali!"); }
+      } catch (e) { busy = false; err = e.message; draw(sh); }
+    };
+  });
+}
+
+function openAccount() {
+  let confirmR = null, err = "", editing = false, orders = [], unO = null;
+  watchMyOrders(user.uid, list => { orders = list; if ($("#modal .acct-sheet")) redraw(); }).then(u => unO = u);
+  let redraw = () => {};
+  openModal(function draw(sh) {
+    redraw = () => draw(sh);
+    if (!member) { sh.innerHTML = `<p>Memuatkan akaun…</p>`; return; }
+    const pts = member.points, next = LOYALTY.rewards.find(r => r.cost > pts) || null;
+    const vs = activeVouchers(), used = (member.vouchers || []).filter(v => v.status !== "active");
+    sh.innerHTML = `<div class="acct-sheet">
+      <div class="card-pts">
+        <div><div class="lbl">Hai, ${esc(member.name)}</div><div class="big num">${pts}<small> point</small></div>
+        <div class="lbl">${next ? `${next.cost - pts} point lagi untuk ${esc(next.title)}` : "Point cukup untuk tebus semua ganjaran!"}</div></div>
+        <img src="icon-192.png" alt="" width="54" height="54">
+      </div>
+      ${next ? `<div class="bar"><i style="width:${Math.min(100, pts / next.cost * 100)}%"></i></div>` : ""}
+
+      <h3 class="cat-title">Voucher saya (${vs.length})</h3>
+      ${vs.length ? vs.map(v => `<div class="vcard"><div><b>${esc(v.title)}</b><small>${v.min ? `Min. belanja ${rm(v.min)}` : "Tiada minimum"} · guna masa checkout</small></div><span class="vval num">-${rm(v.value)}</span></div>`).join("") : `<p class="muted">Tiada voucher aktif. Tebus point di bawah.</p>`}
+
+      <h3 class="cat-title">Tebus point</h3>
+      ${LOYALTY.rewards.map(r => `<div class="vcard ${pts < r.cost ? "dim" : ""}"><div><b>${esc(r.title)}</b><small class="num">${r.cost} point</small></div>
+        ${confirmR === r.id ? `<span class="row-btns"><button class="btn ghost sm" data-no>Batal</button><button class="btn sm" data-yes="${r.id}">Ya, tebus</button></span>`
+        : `<button class="btn sm" data-r="${r.id}" ${pts < r.cost ? "disabled" : ""}>Tebus</button>`}</div>`).join("")}
+      ${err ? `<div class="err">${esc(err)}</div>` : ""}
+
+      <h3 class="cat-title">Order terkini</h3>
+      ${orders.length ? `<div class="hist-list">${orders.slice(0, 8).map(o => `<div><span class="num">#${pad3(o.no)} · ${dt(o.createdAt)}</span><span>${o.items.reduce((s, i) => s + i.qty, 0)} item</span><span class="num">${rm(o.total)}</span><span class="pt num">${o.pointsAwarded ? "+" + o.points + " pt" : o.status === "cancel" ? "Batal" : "Belum ambil"}</span></div>`).join("")}</div>` : `<p class="muted">Belum ada order.</p>`}
+      ${used.length ? `<p class="muted" style="margin-top:6px">${used.length} voucher dah digunakan.</p>` : ""}
+
+      <h3 class="cat-title">Profil</h3>
+      ${editing ? `
+        <label class="field"><span>Nama</span><input type="text" id="pName" maxlength="30" value="${esc(member.name)}"></label>
+        <label class="field"><span>No. telefon</span><input type="tel" id="pPhone" maxlength="15" value="${esc(member.phone)}"></label>
+        <div class="sheet-foot"><button class="btn ghost" id="pCancel">Batal</button><button class="btn" id="pSave">Simpan</button></div>`
+      : `<div class="prof"><div>${esc(member.name)}<br><span class="muted">${esc(member.phone || "Tiada no. telefon")} · ${esc(member.email)}</span></div><button class="btn ghost sm" id="pEdit">Ubah</button></div>`}
+      <div class="sheet-foot"><button class="btn ghost" id="logout">Log keluar</button><button class="btn wide" id="accClose"><span>Kembali ke menu</span><span>→</span></button></div>
+    </div>`;
+    const close = () => { unO && unO(); closeModal(); render(); };
+    $("#accClose").onclick = close;
+    $("#logout").onclick = async () => { unO && unO(); closeModal(); await signOutCustomer(); toast("Anda dah log keluar."); };
+    sh.querySelectorAll("[data-r]").forEach(b => b.onclick = () => { confirmR = b.dataset.r; err = ""; draw(sh); });
+    sh.querySelectorAll("[data-no]").forEach(b => b.onclick = () => { confirmR = null; draw(sh); });
+    sh.querySelectorAll("[data-yes]").forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      try { await redeemReward(user.uid, b.dataset.yes); confirmR = null; toast("Voucher baru dah masuk akaun anda!"); }
+      catch (e) { err = e.message === "Point tak cukup." ? e.message : "Tak berjaya tebus. Cuba lagi."; confirmR = null; }
+      draw(sh);
+    });
+    const pe = $("#pEdit"); if (pe) pe.onclick = () => { editing = true; draw(sh); };
+    const pc = $("#pCancel"); if (pc) pc.onclick = () => { editing = false; draw(sh); };
+    const ps = $("#pSave"); if (ps) ps.onclick = async () => {
+      const name = $("#pName").value.trim(), phone = $("#pPhone").value.trim();
+      if (!name) return;
+      try { await updateProfile(user.uid, { name, phone }); custName = name; custPhone = phone; editing = false; toast("Profil disimpan."); } catch (e) { err = "Tak berjaya simpan profil."; }
+      draw(sh);
+    };
+  });
+}
+
 /* ---------- menu ---------- */
+function promo() {
+  if (isMember()) {
+    const n = activeVouchers().length;
+    return `<button class="promo member" id="promoBtn"><span><b>Hai ${esc(member.name.split(" ")[0])}!</b> Anda ada <b class="num">${member.points}</b> point${n ? ` dan <b>${n} voucher</b>` : ""}.</span><span class="go">Akaun saya →</span></button>`;
+  }
+  return `<button class="promo" id="promoBtn"><span><b>Daftar ahli percuma.</b> Dapat ${esc(LOYALTY.welcome.title.toLowerCase())} dan kumpul point setiap order.</span><span class="go">Daftar →</span></button>`;
+}
 function render() {
   if (myOrder) return renderMyOrder();
   const counts = {}; cart.forEach(l => counts[l.itemId] = (counts[l.itemId] || 0) + l.qty);
@@ -71,6 +211,7 @@ function render() {
       <p>Order dari telefon, kami terus sediakan. Datang ambil bila status bertukar "Siap", tak perlu beratur.</p></div>
       <div class="where"><strong>Takeaway</strong> · ambil di kaunter</div>
     </section>
+    ${user ? promo() : ""}
     <div class="chips" role="toolbar" aria-label="Kategori">
       <button data-cat="all" aria-pressed="${cat === "all"}">Semua</button>
       ${MENU.map(c => `<button data-cat="${esc(c.cat)}" aria-pressed="${cat === c.cat}">${esc(c.cat)}</button>`).join("")}
@@ -84,6 +225,7 @@ function render() {
           <span class="row"><span class="price num">${rm(it.price)}</span>${counts[it.id] ? `<span class="incart">${counts[it.id]} dalam troli</span>` : ""}<span class="add" aria-hidden="true">+</span></span></span>
         </button>`).join("")}</div>`).join("")}
     <div class="spacer"></div>`;
+  const pb = $("#promoBtn"); if (pb) pb.onclick = () => isMember() ? openAccount() : openAuth("daftar");
   document.querySelectorAll("[data-cat]").forEach(b => b.onclick = () => { cat = b.dataset.cat; render(); });
   document.querySelectorAll("[data-item]").forEach(b => b.onclick = () => openItem(b.dataset.item));
   updateCartBar();
@@ -119,26 +261,44 @@ function openItem(id) {
 }
 
 /* ---------- checkout ---------- */
-$("#openCart").onclick = () => {
+$("#openCart").onclick = openCart;
+function openCart() {
   let err = "";
   openModal(function draw(sh) {
     if (!cart.length) { closeModal(); render(); return; }
+    const sub = cartTotal();
+    const vs = isMember() ? activeVouchers() : [];
+    if (chosenVoucher && (!vs.find(v => v.id === chosenVoucher.id) || sub < chosenVoucher.min)) chosenVoucher = null;
+    const disc = chosenVoucher ? chosenVoucher.value : 0, total = r2(sub - disc);
     sh.innerHTML = `
-      <h2>Troli anda</h2><div class="sub">${cartQty()} item</div>
+      <h2>Troli anda</h2><div class="sub">${cartQty()} item · Takeaway, ambil di kaunter</div>
       ${cart.map((l, i) => `<div class="line"><span class="nm">${esc(l.name)}</span>
         <span class="op">${esc([...l.opts, l.note && ("Nota: " + l.note)].filter(Boolean).join(" · ")) || "&nbsp;"}</span>
         <span class="ctl"><span class="num" style="font-weight:700">${rm(l.unit * l.qty)}</span>
         <span class="qty"><button data-m="${i}" aria-label="Kurang">−</button><span class="num">${l.qty}</span><button data-p="${i}" aria-label="Tambah">+</button></span></span></div>`).join("")}
-      <div class="sum"><span>Jumlah</span><span class="num">${rm(cartTotal())}</span></div>
-      <div class="hint" style="margin-top:12px"><b>Takeaway</b> · ambil di kaunter bila order siap.</div>
+
+      ${isMember() ? `
+        <div class="opt"><label class="t">Voucher</label>
+        ${vs.length ? `<div class="vpick">${vs.map(v => { const ok = sub >= v.min; return `<button data-v="${v.id}" aria-pressed="${chosenVoucher?.id === v.id}" ${ok ? "" : "disabled"}><b>${esc(v.title)}</b><small>${ok ? `-${rm(v.value)}` : `Min. belanja ${rm(v.min)}`}</small></button>`; }).join("")}</div>`
+          : `<p class="muted" style="margin:0">Tiada voucher aktif.</p>`}</div>`
+      : `<button class="promo slim" id="joinBtn"><span><b>Belum ahli?</b> Daftar sekarang, terus dapat ${esc(LOYALTY.welcome.title.toLowerCase())} untuk order ini${pointsFor(sub) ? ` dan ${pointsFor(sub)} point` : ""}.</span><span class="go">Daftar →</span></button>`}
+
+      <div class="sums">
+        <div><span>Subtotal</span><span class="num">${rm(sub)}</span></div>
+        ${disc ? `<div class="disc"><span>${esc(chosenVoucher.title)}</span><span class="num">-${rm(disc)}</span></div>` : ""}
+        <div class="sum"><span>Jumlah</span><span class="num">${rm(total)}</span></div>
+        ${isMember() ? `<div class="earn">★ Anda akan dapat <b class="num">${pointsFor(total)} point</b> bila ambil order ini.</div>` : ""}
+      </div>
       <label class="field"><span>Nama</span><input type="text" id="fName" maxlength="30" placeholder="Nama untuk panggilan" value="${esc(custName)}"></label>
       <label class="field"><span>No. telefon (pilihan)</span><input type="tel" id="fPhone" maxlength="15" placeholder="01x-xxxxxxx" value="${esc(custPhone)}"></label>
       <div class="hint" style="margin-top:12px">Bayaran di kaunter semasa ambil. Maklumat anda hanya digunakan untuk urusan order ini.</div>
       ${err ? `<div class="err">${esc(err)}</div>` : ""}
-      <div class="sheet-foot"><button class="btn ghost" id="cClose">Tambah lagi</button><button class="btn wide" id="cSend"><span>Hantar order</span><span class="num">${rm(cartTotal())}</span></button></div>`;
+      <div class="sheet-foot"><button class="btn ghost" id="cClose">Tambah lagi</button><button class="btn wide" id="cSend"><span>Hantar order</span><span class="num">${rm(total)}</span></button></div>`;
     const keep = () => { const n = $("#fName"), p = $("#fPhone"); if (n) custName = n.value.trim(); if (p) custPhone = p.value.trim(); };
     sh.querySelectorAll("[data-m]").forEach(b => b.onclick = () => { keep(); const l = cart[+b.dataset.m]; l.qty--; if (l.qty < 1) cart.splice(+b.dataset.m, 1); saveCart(); updateCartBar(); draw(sh); });
     sh.querySelectorAll("[data-p]").forEach(b => b.onclick = () => { keep(); cart[+b.dataset.p].qty++; saveCart(); updateCartBar(); draw(sh); });
+    sh.querySelectorAll("[data-v]").forEach(b => b.onclick = () => { keep(); const v = vs.find(x => x.id === b.dataset.v); chosenVoucher = chosenVoucher?.id === v.id ? null : v; draw(sh); });
+    const jb = $("#joinBtn"); if (jb) jb.onclick = () => { keep(); openAuth("daftar", () => { chosenVoucher = null; setTimeout(openCart, 400); }); };
     $("#cClose").onclick = () => { keep(); closeModal(); render(); };
     $("#cSend").onclick = async () => {
       keep();
@@ -146,37 +306,48 @@ $("#openCart").onclick = () => {
       const btn = $("#cSend"); btn.disabled = true; btn.firstElementChild.textContent = "Menghantar…";
       try {
         await customerInit();
+        const v = chosenVoucher ? { id: chosenVoucher.id, value: chosenVoucher.value, title: chosenVoucher.title } : null;
         const r = await createOrder({
-          type: "take", table: "", name: custName, phone: custPhone,
+          name: custName, phone: custPhone,
           items: cart.map(l => ({ name: l.name, opts: l.opts, note: l.note, qty: l.qty, unit: l.unit, food: l.food })),
-          total: Math.round(cartTotal() * 100) / 100
-        });
-        ls.set("sips.name", custName);
-        myOrder = r; ls.set("sips.myorder", r); cart = []; saveCart();
+          subtotal: sub
+        }, v);
+        ls.set("sips.name", custName); ls.set("sips.phone", custPhone);
+        myOrder = r; ls.set("sips.myorder", r); cart = []; saveCart(); chosenVoucher = null;
         closeModal(); startWatch(); render();
-      } catch (e) { console.error(e); err = "Order tak berjaya dihantar. Semak internet dan cuba lagi."; draw(sh); }
+      } catch (e) {
+        console.error(e);
+        err = e.message === "Voucher dah digunakan." ? "Voucher ini dah digunakan. Pilih voucher lain." : "Order tak berjaya dihantar. Semak internet dan cuba lagi.";
+        if (e.message === "Voucher dah digunakan.") chosenVoucher = null;
+        draw(sh);
+      }
     };
   });
-};
+}
 
 /* ---------- status order sendiri ---------- */
 const STEPS = [["new", "Diterima"], ["prep", "Disediakan"], ["ready", "Siap"]];
 async function startWatch() {
   if (!myOrder) return;
-  try { await customerInit(); unwatch && unwatch(); unwatch = await watchMyOrder(myOrder.id, o => { myOrderData = o; render(); }); } catch (e) { console.error(e); }
+  try { await customerInit(); unwatch && unwatch(); unwatch = await watchMyOrder(myOrder.id, o => { myOrderData = o; if (!$("#modal").innerHTML) render(); }); } catch (e) { console.error(e); }
 }
 function renderMyOrder() {
   const o = myOrderData, st = o?.status || "new";
   const idx = st === "done" ? 2 : STEPS.findIndex(s => s[0] === st);
   const msg = { new: "Order anda dah sampai ke kaunter. Staff akan sahkan sekejap lagi.", prep: "Barista sedang sediakan order anda.", ready: "Order anda dah siap! Sila ambil di kaunter.", done: "Terima kasih! Jumpa lagi di SIPS.", cancel: "Order ini dibatalkan oleh outlet. Sila hubungi kaunter." }[st];
+  let extra = "";
+  if (o?.member) extra = o.pointsAwarded ? `<div class="earn big">★ +${o.points} point dah masuk akaun anda</div>` : st !== "cancel" ? `<div class="earn">★ ${pointsFor(o.total)} point akan masuk bila anda ambil order</div>` : "";
+  else if (o && st !== "cancel") extra = `<button class="promo slim" id="joinAfter"><span>Daftar ahli untuk kumpul point pada order akan datang.</span><span class="go">Daftar →</span></button>`;
   $("#view-menu").innerHTML = `<div class="done">
     <div style="font-weight:700;color:var(--muted);letter-spacing:.1em;font-size:12px;text-transform:uppercase">No. order anda</div>
-    <div class="big num">#${String(myOrder.no).padStart(3, "0")}</div>
-    ${o ? `<div style="margin-top:6px;color:var(--muted)">Takeaway · ${esc(o.name)} · ${rm(o.total)}</div>` : ""}
+    <div class="big num">#${pad3(myOrder.no)}</div>
+    ${o ? `<div style="margin-top:6px;color:var(--muted)">Takeaway · ${esc(o.name)} · ${rm(o.total)}${o.discount ? ` <span class="disc-tag">voucher -${rm(o.discount)}</span>` : ""}</div>` : ""}
     ${st === "cancel" ? "" : `<div class="steps">${STEPS.map((s, i) => `<div class="${i <= idx ? "on" : ""}">${s[1]}</div>`).join("")}</div>`}
-    <p style="margin:6px 0 18px">${msg}</p>
-    <button class="btn" id="again">Buat order baru</button></div>`;
+    <p style="margin:6px 0 14px">${msg}</p>
+    ${extra}
+    <button class="btn" id="again" style="margin-top:14px">Buat order baru</button></div>`;
   $("#again").onclick = () => { unwatch && unwatch(); myOrder = null; myOrderData = null; ls.set("sips.myorder", null); render(); };
+  const ja = $("#joinAfter"); if (ja) ja.onclick = () => openAuth("daftar");
   updateCartBar();
 }
 

@@ -38,7 +38,7 @@
 
 <script type="module">
 import { OUTLET } from "./config.js";
-import { LIVE, today, staffWatch, staffLogin, staffLogout, watchOrders, updateOrder, deleteOrder } from "./data.js";
+import { LIVE, today, pointsFor, staffWatch, staffLogin, staffLogout, watchOrders, updateOrder, deleteOrder, completeOrder, cancelOrder } from "./data.js";
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -129,8 +129,8 @@ function render() {
       ${lane("ready", "Siap diambil", "Order yang dah siap akan tunggu di sini.")}
     </div>
     <details class="hist" id="hist" ${histOpen ? "open" : ""}><summary>Selesai &amp; batal hari ini (${done.length})</summary>
-      <div class="htable">${done.length ? `<table><thead><tr><th>No</th><th>Masa</th><th>Nama</th><th>Item</th><th>Jumlah</th><th>Status</th></tr></thead><tbody>
-      ${done.map(o => `<tr><td class="num">#${pad3(o.no)}</td><td class="num">${tm(o.createdAt)}</td><td>${esc(o.name)}</td><td>${o.items.reduce((s, i) => s + i.qty, 0)}</td><td class="num">${rm(o.total)}</td><td>${o.status === "done" ? "Selesai" : "Batal"}</td></tr>`).join("")}
+      <div class="htable">${done.length ? `<table><thead><tr><th>No</th><th>Masa</th><th>Nama</th><th>Item</th><th>Jumlah</th><th>Point</th><th>Status</th></tr></thead><tbody>
+      ${done.map(o => `<tr><td class="num">#${pad3(o.no)}</td><td class="num">${tm(o.createdAt)}</td><td>${esc(o.name)}</td><td>${o.items.reduce((s, i) => s + i.qty, 0)}</td><td class="num">${rm(o.total)}${o.discount ? ` <small>(-${rm(o.discount)})</small>` : ""}</td><td class="num">${o.pointsAwarded ? "+" + o.points : o.member ? "-" : "Tetamu"}</td><td>${o.status === "done" ? "Selesai" : "Batal"}</td></tr>`).join("")}
       </tbody></table>` : `<p style="color:var(--muted)">Belum ada.</p>`}</div>
       <div class="danger">${confirmClear ? `<span>Padam semua order hari ini? Tak boleh undo.</span><button class="btn" style="background:var(--new);color:#fff" id="clrYes">Ya, padam</button><button class="btn ghost" id="clrNo">Batal</button>` : `<button class="btn ghost" id="clr">Kosongkan order hari ini</button>`}</div>
     </details>
@@ -154,10 +154,11 @@ function ticket(o) {
     ready: `<button data-act="back" data-id="${o.id}">Undur</button><button class="go" data-act="done" data-id="${o.id}">Dah diambil</button>`
   }[o.status] || "";
   return `<article class="ticket s-${o.status}">
-    <div class="hd"><span class="no num">#${pad3(o.no)}</span><span class="pill ${o.type}">Takeaway</span>${o.printed ? `<span class="printed">✓ print ${o.printed}×</span>` : ""}<span class="time num">${tm(o.createdAt)} · ${ago(o.createdAt)}</span></div>
+    <div class="hd"><span class="no num">#${pad3(o.no)}</span><span class="pill ${o.type}">Takeaway</span>${o.member ? `<span class="pill mem">★ Ahli</span>` : ""}${o.printed ? `<span class="printed">✓ print ${o.printed}×</span>` : ""}<span class="time num">${tm(o.createdAt)} · ${ago(o.createdAt)}</span></div>
     ${o.name || o.phone ? `<div class="who" style="font-weight:700;color:var(--fg)">${esc(o.name)}${o.phone ? " · " + esc(o.phone) : ""}</div>` : ""}
     <ul>${o.items.map(i => `<li><b class="num">${i.qty}×</b><span>${esc(i.name)}</span>${i.opts.length || i.note ? `<small>${esc(i.opts.join(" · "))}${i.note ? ` · <b style="color:var(--new)">${esc(i.note)}</b>` : ""}</small>` : ""}</li>`).join("")}</ul>
-    <div class="ft"><span class="tot num">${rm(o.total)}</span>${btns}</div></article>`;
+    ${o.discount ? `<div class="vline"><span>🎟 ${esc(o.voucherTitle || "Voucher")}</span><span class="num">Subtotal ${rm(o.subtotal)} · -${rm(o.discount)}</span></div>` : ""}
+    <div class="ft"><span class="tot num">${rm(o.total)}${o.member ? `<small class="ptsnote">+${pointsFor(o.total)} pt bila diambil</small>` : ""}</span>${btns}</div></article>`;
 }
 async function act(id, a) {
   const o = orders.find(x => x.id === id); if (!o) return;
@@ -166,8 +167,8 @@ async function act(id, a) {
     else if (a === "docket") queueDocket(o, false);
     else if (a === "ready") await updateOrder(id, { status: "ready", readyAt: Date.now() });
     else if (a === "back") await updateOrder(id, { status: "prep" });
-    else if (a === "done") await updateOrder(id, { status: "done", doneAt: Date.now() });
-    else if (a === "cancel") await updateOrder(id, { status: "cancel", cancelAt: Date.now() });
+    else if (a === "done") { const g = await completeOrder(o); if (g) toast(`+${g} point diberi kepada ${o.name}`); }
+    else if (a === "cancel") { await cancelOrder(o); if (o.voucherId) toast("Order dibatal. Voucher dipulangkan kepada ahli."); }
   } catch (e) { toast("Tak berjaya kemaskini. Cuba lagi."); }
 }
 

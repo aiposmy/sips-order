@@ -4,17 +4,32 @@
 //  2. Selagi apiKey bermula dengan "ISI", sistem jalan dalam MOD DEMO
 //     (order disimpan dalam browser ini sahaja — untuk test).
 // ================================================================
-   export const FIREBASE_CONFIG = {
-     apiKey: "AIzaSyBlQ0gP1ITJuXl6541xpzyEy3fGNTCkLqc",
-     authDomain: "sips-order.firebaseapp.com",
-     projectId: "sips-order",
-     storageBucket: "sips-order.firebasestorage.app",
-     messagingSenderId: "648088858617",
-     appId: "1:648088858617:web:719c6716c3a5451a48d728"
-   };
+export const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBlQ0gP1ITJuXl6541xpzyEy3fGNTCkLqc",
+  authDomain: "sips-order.firebaseapp.com",
+  projectId: "sips-order",
+  storageBucket: "sips-order.firebasestorage.app",
+  messagingSenderId: "648088858617",
+  appId: "1:648088858617:web:719c6716c3a5451a48d728"
+};
+
 export const OUTLET = {
   name: "SIPS",
   branch: "Cawangan Utama"
+};
+
+// ================================================================
+//  PROGRAM AHLI (POINT & VOUCHER)
+//  PENTING: kalau tukar nilai di sini, tukar juga nombor yang sama
+//  dalam firestore.rules (bahagian "PROGRAM AHLI") dan Publish semula.
+// ================================================================
+export const LOYALTY = {
+  pointsPerRM: 1,                 // 1 point untuk setiap RM1 dibelanja (dibundarkan ke bawah)
+  welcome: { id: "welcome", title: "Diskaun RM2 untuk ahli baru", value: 2, min: 8 },
+  rewards: [
+    { id: "r5",  title: "Diskaun RM5",  cost: 50, value: 5 },
+    { id: "r10", title: "Diskaun RM10", cost: 90, value: 10 },
+  ],
 };
 
 // ================================================================
