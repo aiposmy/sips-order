@@ -4,15 +4,14 @@
 //  2. Selagi apiKey bermula dengan "ISI", sistem jalan dalam MOD DEMO
 //     (order disimpan dalam browser ini sahaja — untuk test).
 // ================================================================
-export const FIREBASE_CONFIG = {
-  apiKey: "ISI_API_KEY_DI_SINI",
-  authDomain: "",
-  projectId: "",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: ""
-};
-
+   export const FIREBASE_CONFIG = {
+     apiKey: "AIzaSyBlQ0gP1ITJuXl6541xpzyEy3fGNTCkLqc",
+     authDomain: "sips-order.firebaseapp.com",
+     projectId: "sips-order",
+     storageBucket: "sips-order.firebasestorage.app",
+     messagingSenderId: "648088858617",
+     appId: "1:648088858617:web:719c6716c3a5451a48d728"
+   };
 export const OUTLET = {
   name: "SIPS",
   branch: "Cawangan Utama"
