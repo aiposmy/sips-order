@@ -4,18 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>SIPS Order</title>
-<meta name="theme-color" content="#1F3D32">
+<meta name="theme-color" content="#123F2B">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800;900&family=Figtree:wght@400;500;600;700&family=Dancing+Script:wght@600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Kaushan+Script&display=swap">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="customer.css">
+<link rel="preload" as="image" href="img/hero.webp">
 </head>
-<body>
+<body class="cust">
 <header class="band">
   <div class="wrap">
-    <img class="logo" src="logo.png" alt="SIPS Barley &amp; Comfort">
+    <img class="logo" src="img/logo-t.png" alt="SIPS Barley &amp; Comfort" width="140" height="72">
     <span class="tag">Goodness in Every Sip.</span>
     <button class="acct" id="acctBtn" hidden>Log masuk</button>
   </div>
@@ -44,6 +46,12 @@ if (!LIVE) { $("#banner").hidden = false; $("#bannerText").innerHTML = "<span><b
 if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
 
 const ITEM = {}; MENU.forEach(c => c.items.forEach(i => ITEM[i.id] = i));
+const USER_ICO = `<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4.2" fill="currentColor"/><path d="M3.8 21c.9-4.2 4.2-6.6 8.2-6.6s7.3 2.4 8.2 6.6z" fill="currentColor"/></svg>`;
+const LEAF = `<svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 4C10 4 4 9 4 17c0 1 .1 2 .3 3C6 13 10 10 16 8c-5 3-8 7-9.5 12C16 20 20 13 20 4z" fill="currentColor"/></svg>`;
+function pic(it) {
+  if (it.img) return `<img src="${esc(it.img)}" alt="${esc(it.name)}" loading="lazy" decoding="async">`;
+  return `<span class="ill" style="--tint:${it.color}">${art(it)}</span>`;
+}
 function art(it) {
   if (it.food) return `<svg width="54" height="54" viewBox="0 0 54 54" aria-hidden="true"><ellipse cx="27" cy="38" rx="22" ry="7" fill="var(--line)"/><rect x="10" y="18" width="34" height="18" rx="7" fill="${it.color}"/><rect x="10" y="18" width="34" height="6" rx="3" fill="#fff" opacity=".35"/></svg>`;
   return `<svg width="54" height="62" viewBox="0 0 54 62" aria-hidden="true"><rect x="25" y="1" width="3" height="16" rx="1.5" fill="var(--green)" transform="rotate(12 26 9)"/><path d="M9 14h36l-4 44a3 3 0 0 1-3 3H16a3 3 0 0 1-3-3z" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5"/><path d="M12 24h30l-3.2 33a2 2 0 0 1-2 2H17.2a2 2 0 0 1-2-2z" fill="${it.color}"/><rect x="7" y="11" width="40" height="5" rx="2.5" fill="var(--green)"/><path d="M27 40c-3-4-1-8 3-9-1 4 0 6-3 9z" fill="var(--green)" opacity=".7"/></svg>`;
@@ -84,8 +92,8 @@ onCustomerAuth(async u => {
 });
 function paintAcct() {
   const b = $("#acctBtn"); b.hidden = false;
-  if (isMember()) b.innerHTML = `<span class="star">★</span> <span class="num">${member.points}</span> point`;
-  else b.textContent = "Daftar / Log masuk";
+  if (isMember()) b.innerHTML = `${USER_ICO}<span class="star">★</span><span class="num">${member.points}</span> point`;
+  else b.innerHTML = `${USER_ICO}<span>Daftar / Log masuk</span>`;
 }
 $("#acctBtn").onclick = () => isMember() ? openAccount() : openAuth("daftar");
 
@@ -198,18 +206,22 @@ function openAccount() {
 function promo() {
   if (isMember()) {
     const n = activeVouchers().length;
-    return `<button class="promo member" id="promoBtn"><span><b>Hai ${esc(member.name.split(" ")[0])}!</b> Anda ada <b class="num">${member.points}</b> point${n ? ` dan <b>${n} voucher</b>` : ""}.</span><span class="go">Akaun saya →</span></button>`;
+    return `<div class="promo-card"><img src="img/gift.jpg" alt="" width="160" height="102"><div class="pc-body"><span class="eyebrow">Ahli SIPS</span><h2>Hai ${esc(member.name.split(" ")[0])}!</h2><p>Anda ada <b class="num">${member.points} point</b>${n ? ` dan <b>${n} voucher</b>` : ""} untuk digunakan.</p></div><button class="pc-btn" id="promoBtn">Akaun saya →</button></div>`;
   }
-  return `<button class="promo" id="promoBtn"><span><b>Daftar ahli percuma.</b> Dapat ${esc(LOYALTY.welcome.title.toLowerCase())} dan kumpul point setiap order.</span><span class="go">Daftar →</span></button>`;
+  return `<div class="promo-card"><img src="img/gift.jpg" alt="" width="160" height="102"><div class="pc-body"><span class="eyebrow">Ahli SIPS</span><h2>Daftar ahli percuma.</h2><p>Dapat ${esc(LOYALTY.welcome.title.charAt(0).toLowerCase() + LOYALTY.welcome.title.slice(1))} dan kumpul point setiap order.</p></div><button class="pc-btn" id="promoBtn">Daftar →</button></div>`;
 }
 function render() {
   if (myOrder) return renderMyOrder();
   const counts = {}; cart.forEach(l => counts[l.itemId] = (counts[l.itemId] || 0) + l.qty);
   $("#view-menu").innerHTML = `
-    <section class="hero">
-      <div><h1>Pesan barli kegemaran,<br>siap untuk diambil.</h1>
-      <p>Order dari telefon, kami terus sediakan. Datang ambil bila status bertukar "Siap", tak perlu beratur.</p></div>
-      <div class="where"><strong>Takeaway</strong> · ambil di kaunter</div>
+    <section class="hero2">
+      <div class="h-copy">
+        <h1><span class="script">Pesan barli kegemaran,</span> <span class="solid">siap untuk diambil.</span></h1>
+        <p>Order dari telefon, kami terus sediakan. Datang ambil bila status bertukar <mark>“Siap”</mark>, tak perlu beratur.</p>
+
+      </div>
+      <div class="where2"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8h12l-1 13H7z" fill="var(--honey)"/><path d="M9 8V6a3 3 0 0 1 6 0v2" stroke="var(--honey)" stroke-width="2" fill="none"/></svg><b>Takeaway</b><span>· ambil di kaunter</span></div>
+      <div class="h-pic"><img src="img/hero.webp" alt="Air barli SIPS sejuk dengan ais" width="300" height="408" fetchpriority="high"></div>
     </section>
     ${user ? promo() : ""}
     <div class="chips" role="toolbar" aria-label="Kategori">
@@ -219,10 +231,11 @@ function render() {
     ${MENU.filter(c => cat === "all" || c.cat === cat).map(c => `
       <h2 class="cat-title">${esc(c.cat)}</h2>
       <div class="grid">${c.items.map(it => `
-        <button class="item" data-item="${it.id}">
-          <span class="art">${art(it)}</span>
-          <span><h3>${esc(it.name)}</h3><p>${esc(it.desc)}</p>
-          <span class="row"><span class="price num">${rm(it.price)}</span>${counts[it.id] ? `<span class="incart">${counts[it.id]} dalam troli</span>` : ""}<span class="add" aria-hidden="true">+</span></span></span>
+        <button class="item2" data-item="${it.id}">
+          <span class="i-pic">${pic(it)}${counts[it.id] ? `<span class="incart2 num">${counts[it.id]} dalam troli</span>` : ""}</span>
+          <span class="i-body"><h3>${esc(it.name)}</h3><p>${esc(it.desc)}</p>
+          ${it.tags?.length ? `<span class="tags">${it.tags.map(t => `<span>${LEAF}${esc(t)}</span>`).join("")}</span>` : ""}
+          <span class="row"><span class="price num">${rm(it.price)}</span><span class="add2" aria-hidden="true">+</span></span></span>
         </button>`).join("")}</div>`).join("")}
     <div class="spacer"></div>`;
   const pb = $("#promoBtn"); if (pb) pb.onclick = () => isMember() ? openAccount() : openAuth("daftar");
@@ -239,8 +252,8 @@ function openItem(id) {
   const unit = () => it.price + it.opts.reduce((s, o) => s + o.choices[sel[o.key]].p, 0);
   openModal(function draw(sh) {
     sh.innerHTML = `
-      <div style="display:flex;gap:14px;align-items:center"><span class="art" style="width:64px;height:64px;border-radius:12px;background:var(--surface-2);display:grid;place-items:center;flex:none">${art(it)}</span>
-      <div><h2>${esc(it.name)}</h2><div class="sub">${esc(it.desc)}</div></div></div>
+      <div class="it-head"><span class="it-pic">${pic(it)}</span>
+      <div><h2>${esc(it.name)}</h2><div class="sub">${esc(it.desc)}</div><div class="price num">${rm(it.price)}</div></div></div>
       ${it.opts.map(o => `<div class="opt"><label class="t">${o.label}</label><div class="seg">${o.choices.map((c, i) => `<button data-k="${o.key}" data-i="${i}" aria-pressed="${sel[o.key] === i}">${c.n}${c.p ? ` <small>+${rm(c.p)}</small>` : ""}</button>`).join("")}</div></div>`).join("")}
       <label class="field"><span>Nota untuk dapur</span><input type="text" id="itemNote" maxlength="80" placeholder="Cth: ais sikit, tanpa straw" value="${esc(note)}"></label>
       <div class="sheet-foot"><div class="qty"><button id="qm" aria-label="Kurang">−</button><span class="num">${qty}</span><button id="qp" aria-label="Tambah">+</button></div>
@@ -281,7 +294,7 @@ function openCart() {
         <div class="opt"><label class="t">Voucher</label>
         ${vs.length ? `<div class="vpick">${vs.map(v => { const ok = sub >= v.min; return `<button data-v="${v.id}" aria-pressed="${chosenVoucher?.id === v.id}" ${ok ? "" : "disabled"}><b>${esc(v.title)}</b><small>${ok ? `-${rm(v.value)}` : `Min. belanja ${rm(v.min)}`}</small></button>`; }).join("")}</div>`
           : `<p class="muted" style="margin:0">Tiada voucher aktif.</p>`}</div>`
-      : `<button class="promo slim" id="joinBtn"><span><b>Belum ahli?</b> Daftar sekarang, terus dapat ${esc(LOYALTY.welcome.title.toLowerCase())} untuk order ini${pointsFor(sub) ? ` dan ${pointsFor(sub)} point` : ""}.</span><span class="go">Daftar →</span></button>`}
+      : `<button class="promo slim" id="joinBtn"><span><b>Belum ahli?</b> Daftar sekarang, terus dapat ${esc(LOYALTY.welcome.title.charAt(0).toLowerCase() + LOYALTY.welcome.title.slice(1))} untuk order ini${pointsFor(sub) ? ` dan ${pointsFor(sub)} point` : ""}.</span><span class="go">Daftar →</span></button>`}
 
       <div class="sums">
         <div><span>Subtotal</span><span class="num">${rm(sub)}</span></div>
