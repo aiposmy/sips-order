@@ -30,8 +30,8 @@
 <div class="toast" id="toast" hidden></div>
 
 <script type="module">
-import { MENU, LOYALTY, GIFT } from "./config.js";
-import { LIVE, pointsFor, customerInit, onCustomerAuth, createOrder, watchMyOrder, watchMyOrders, watchShift,
+import { LOYALTY, GIFT } from "./config.js";
+import { LIVE, pointsFor, watchMenu, buildMenu, customerInit, onCustomerAuth, createOrder, watchMyOrder, watchMyOrders, watchShift,
   signUpEmail, signInEmail, signInGoogle, resetPassword, signOutCustomer, watchMember, updateProfile, redeemReward } from "./data.js";
 
 const $ = s => document.querySelector(s);
@@ -45,7 +45,12 @@ const dt = t => new Date(t).toLocaleDateString("ms-MY", { day: "numeric", month:
 if (!LIVE) { $("#banner").hidden = false; $("#bannerText").innerHTML = "<span><b>Mod demo.</b> Order disimpan dalam browser ini sahaja. Buka <b>outlet.html</b> dalam tab lain untuk lihat order masuk.</span>"; }
 if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
 
-const ITEM = {}; MENU.forEach(c => c.items.forEach(i => ITEM[i.id] = i));
+let MENU = [], ITEM = {}, menuReady = false;
+queueMicrotask(() => watchMenu(({ raw }) => {
+  MENU = buildMenu(raw); ITEM = {}; MENU.forEach(c => c.items.forEach(i => ITEM[i.id] = i)); menuReady = true;
+  if (cat !== "all" && !MENU.some(c => c.cat === cat)) cat = "all";
+  if (!$("#modal").innerHTML) render();
+}));
 const USER_ICO = `<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4.2" fill="currentColor"/><path d="M3.8 21c.9-4.2 4.2-6.6 8.2-6.6s7.3 2.4 8.2 6.6z" fill="currentColor"/></svg>`;
 const LEAF = `<svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 4C10 4 4 9 4 17c0 1 .1 2 .3 3C6 13 10 10 16 8c-5 3-8 7-9.5 12C16 20 20 13 20 4z" fill="currentColor"/></svg>`;
 function pic(it) {
@@ -231,19 +236,20 @@ function render() {
       <button data-cat="all" aria-pressed="${cat === "all"}">Semua</button>
       ${MENU.map(c => `<button data-cat="${esc(c.cat)}" aria-pressed="${cat === c.cat}">${esc(c.cat)}</button>`).join("")}
     </div>
+    ${!menuReady ? `<p class="muted" style="padding:20px 0">Memuatkan menu…</p>` : ""}
     ${MENU.filter(c => cat === "all" || c.cat === cat).map(c => `
       <h2 class="cat-title">${esc(c.cat)}</h2>
       <div class="grid">${c.items.map(it => `
-        <button class="item2" data-item="${it.id}">
-          <span class="i-pic">${pic(it)}${counts[it.id] ? `<span class="incart2 num">${counts[it.id]} dalam troli</span>` : ""}</span>
+        <button class="item2 ${it.soldOut ? "soldout" : ""}" data-item="${it.id}" ${it.soldOut ? `aria-disabled="true"` : ""}>
+          <span class="i-pic">${pic(it)}${it.soldOut ? `<span class="so-badge">Habis</span>` : counts[it.id] ? `<span class="incart2 num">${counts[it.id]} dalam troli</span>` : ""}</span>
           <span class="i-body"><h3>${esc(it.name)}</h3><p>${esc(it.desc)}</p>
           ${it.tags?.length ? `<span class="tags">${it.tags.map(t => `<span>${LEAF}${esc(t)}</span>`).join("")}</span>` : ""}
-          <span class="row"><span class="price num">${rm(it.price)}</span><span class="add2" aria-hidden="true">+</span></span></span>
+          <span class="row"><span class="price num">${rm(it.price)}</span>${it.soldOut ? `<span class="so-txt">Stok habis</span>` : `<span class="add2" aria-hidden="true">+</span>`}</span></span>
         </button>`).join("")}</div>`).join("")}
     <div class="spacer"></div>`;
   const pb = $("#promoBtn"); if (pb) pb.onclick = () => isMember() ? openAccount() : openAuth("daftar");
   document.querySelectorAll("[data-cat]").forEach(b => b.onclick = () => { cat = b.dataset.cat; render(); });
-  document.querySelectorAll("[data-item]").forEach(b => b.onclick = () => openItem(b.dataset.item));
+  document.querySelectorAll("[data-item]").forEach(b => b.onclick = () => { if (ITEM[b.dataset.item]?.soldOut) { toast("Maaf, item ini dah habis buat masa ni."); return; } openItem(b.dataset.item); });
   updateCartBar();
 }
 function updateCartBar() {
@@ -279,6 +285,8 @@ function openItem(id) {
     };
   });
 }
+
+const catOf = id => (MENU.find(c => c.items.some(i => i.id === id)) || {}).cat || "";
 
 /* ---------- ucapan pada cawan ---------- */
 function giftBox(g) {
@@ -316,7 +324,7 @@ function openCart() {
     const disc = chosenVoucher ? chosenVoucher.value : 0, total = r2(sub - disc);
     sh.innerHTML = `
       <h2>Troli anda</h2><div class="sub">${cartQty()} item · Takeaway, ambil di kaunter</div>
-      ${cart.map((l, i) => `<div class="line"><span class="nm">${esc(l.name)}</span>
+      ${cart.map((l, i) => `<div class="line ${ITEM[l.itemId]?.soldOut || (menuReady && !ITEM[l.itemId]) ? "gone" : ""}"><span class="nm">${esc(l.name)}${ITEM[l.itemId]?.soldOut || (menuReady && !ITEM[l.itemId]) ? ` <span class="so-txt">Dah habis, sila buang</span>` : ""}</span>
         <span class="op">${esc([...l.opts, l.note && ("Nota: " + l.note)].filter(Boolean).join(" · ")) || "&nbsp;"}${l.gift ? `<span class="gline">♥ ${l.gift.to ? "Untuk " + esc(l.gift.to) + ": " : ""}“${esc(l.gift.msg)}”${l.gift.from ? " — " + esc(l.gift.from) : ""}</span>` : ""}</span>
         <span class="ctl"><span class="num" style="font-weight:700">${rm(l.unit * l.qty)}</span>
         <span class="qty"><button data-m="${i}" aria-label="Kurang">−</button><span class="num">${l.qty}</span><button data-p="${i}" aria-label="Tambah">+</button></span></span></div>`).join("")}
@@ -348,13 +356,15 @@ function openCart() {
       keep();
       if (!custName) { err = "Sila isi nama supaya staff boleh panggil bila order siap."; draw(sh); return; }
       if (shopOpen === false) { err = "Outlet sedang tutup. Order boleh dihantar bila outlet dibuka."; draw(sh); return; }
+      const gone = cart.filter(l => ITEM[l.itemId]?.soldOut || !ITEM[l.itemId]);
+      if (gone.length) { err = `${gone.map(l => l.name).join(", ")} dah habis. Sila buang dari troli dulu.`; draw(sh); return; }
       const btn = $("#cSend"); btn.disabled = true; btn.firstElementChild.textContent = "Menghantar…";
       try {
         await customerInit();
         const v = chosenVoucher ? { id: chosenVoucher.id, value: chosenVoucher.value, title: chosenVoucher.title } : null;
         const r = await createOrder({
           name: custName, phone: custPhone,
-          items: cart.map(l => ({ name: l.name, opts: l.opts, note: l.note, qty: l.qty, unit: l.unit, food: l.food, gift: l.gift || null })),
+          items: cart.map(l => ({ pid: l.itemId, cat: catOf(l.itemId), name: l.name, opts: l.opts, note: l.note, qty: l.qty, unit: l.unit, food: l.food, gift: l.gift || null })),
           subtotal: sub
         }, v);
         ls.set("sips.name", custName); ls.set("sips.phone", custPhone);

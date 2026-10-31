@@ -1,0 +1,654 @@
+<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>SIPS Admin</title>
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#1F3D32">
+<link rel="icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800;900&family=Figtree:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="outlet.css">
+<link rel="stylesheet" href="admin.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body class="outlet admin">
+<header class="band">
+  <div class="wrap">
+    <img class="logo" src="logo.png" alt="SIPS Barley &amp; Comfort">
+    <span class="tag">Admin</span>
+    <span id="who" class="who-chip" hidden></span>
+  </div>
+</header>
+<div class="banner" id="banner" hidden><div class="wrap" id="bannerText"></div></div>
+
+<main id="login" class="wrap" hidden>
+  <form class="login-card" id="loginForm" novalidate>
+    <h1>Log masuk admin</h1>
+    <p class="sub">Laporan jualan dan urus produk. Hanya akaun berperanan <b>admin</b>.</p>
+    <label class="field"><span>Emel</span><input type="text" id="lEmail" autocomplete="username" inputmode="email"></label>
+    <label class="field"><span>Kata laluan</span><input type="password" id="lPw" autocomplete="current-password"></label>
+    <div class="err" id="lErr" hidden></div>
+    <button class="btn" id="lBtn" style="width:100%;margin-top:16px">Log masuk</button>
+  </form>
+</main>
+
+<div id="app" hidden>
+  <nav class="atabs wrap" aria-label="Bahagian admin">
+    <button data-tab="laporan">Laporan</button>
+    <button data-tab="produk">Produk</button>
+    <button data-tab="kategori">Kategori &amp; pilihan</button>
+    <button data-tab="shift">Shift</button>
+    <button data-tab="order">Order</button>
+  </nav>
+  <main id="view" class="wrap"></main>
+</div>
+<div id="modal"></div>
+<div class="toast" id="toast" hidden></div>
+
+<script type="module">
+import { OUTLET, PAYMENTS, LOYALTY } from "./config.js";
+import { LIVE, today, staffWatch, staffLogin, staffLogout, watchMenu, buildMenu, saveMenuItem, deleteMenuItem, importDefaultMenu,
+  getCosts, saveCosts, ordersInRange, shiftsInRange } from "./data.js";
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const r2 = n => Math.round(n * 100) / 100;
+const rm = n => "RM" + (Math.round(n * 100) / 100).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const pct = n => isFinite(n) ? (Math.round(n * 10) / 10).toFixed(1) + "%" : "—";
+const pad3 = n => String(n).padStart(3, "0");
+const tm = t => new Date(t).toLocaleTimeString("ms-MY", { hour: "2-digit", minute: "2-digit", hour12: false });
+const dtm = t => new Date(t).toLocaleString("ms-MY", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+const num = v => { const n = parseFloat(String(v).replace(",", ".")); return isFinite(n) ? r2(n) : NaN; };
+const PAY = Object.fromEntries(PAYMENTS.map(p => [p.id, p]));
+const DAYS = ["Ahad", "Isnin", "Selasa", "Rabu", "Khamis", "Jumaat", "Sabtu"];
+const ymd = d => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+const parseYmd = s => { const [y, m, d] = s.split("-").map(Number); return new Date(y, m - 1, d); };
+const addDays = (s, n) => { const d = parseYmd(s); d.setDate(d.getDate() + n); return ymd(d); };
+const daysBetween = (a, b) => Math.round((parseYmd(b) - parseYmd(a)) / 864e5) + 1;
+const fmtDay = s => parseYmd(s).toLocaleDateString("ms-MY", { day: "numeric", month: "short" });
+
+if (!LIVE) { $("#banner").hidden = false; $("#bannerText").innerHTML = "<span><b>Mod demo.</b> Kata laluan: <b>1234</b>. Data diambil dari order dalam browser ini.</span>"; }
+
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 2800); }
+function closeModal() { $("#modal").innerHTML = ""; document.body.style.overflow = ""; }
+function openModal(html, { wide = false } = {}) {
+  $("#modal").innerHTML = `<div class="scrim" id="scrim"><div class="sheet ${wide ? "wide" : ""}" role="dialog" aria-modal="true">${html}</div></div>`;
+  document.body.style.overflow = "hidden";
+  $("#scrim").addEventListener("click", e => { if (e.target.id === "scrim") closeModal(); });
+  return $("#modal .sheet");
+}
+function csvDownload(name, rows) {
+  const csv = rows.map(r => r.map(v => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }).join(",")).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
+  a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
+
+/* ---------- LOGIN ---------- */
+let me = null, started = false;
+$("#loginForm").addEventListener("submit", async e => {
+  e.preventDefault(); $("#lErr").hidden = true; $("#lBtn").disabled = true;
+  try { await staffLogin($("#lEmail").value.trim(), $("#lPw").value); if (!LIVE) location.reload(); }
+  catch (err) { $("#lErr").textContent = err.message; $("#lErr").hidden = false; }
+  $("#lBtn").disabled = false;
+});
+
+/* ---------- STATE ---------- */
+let tab = (location.hash || "#laporan").slice(1);
+let raw = null, menuSource = "config", costs = { products: {}, choices: {} };
+const range = { key: "7d", from: addDays(today(), -6), to: today() };
+let rep = null, loadingRep = false, charts = [], sortProd = "sales", orderFilter = { status: "all", source: "all", pay: "all", q: "" };
+
+function setTab(t) {
+  tab = ["laporan", "produk", "kategori", "shift", "order"].includes(t) ? t : "laporan";
+  try { history.replaceState(null, "", "#" + tab); } catch (e) {}
+  document.querySelectorAll("[data-tab]").forEach(b => b.setAttribute("aria-current", b.dataset.tab === tab));
+  render();
+}
+document.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => setTab(b.dataset.tab));
+
+function start() {
+  watchMenu(m => { raw = m.raw; menuSource = m.source; if (!$("#modal").innerHTML && (tab === "produk" || tab === "kategori")) render(); });
+  getCosts().then(c => { costs = c; if (tab !== "order") render(); }).catch(() => {});
+  setTab(tab);
+}
+
+/* ================= RANGE ================= */
+const RANGES = [["today", "Hari ini"], ["yday", "Semalam"], ["7d", "7 hari"], ["30d", "30 hari"], ["month", "Bulan ini"], ["lmonth", "Bulan lepas"], ["custom", "Pilih tarikh"]];
+function applyRange(k) {
+  const t = today(), d = parseYmd(t);
+  range.key = k;
+  if (k === "today") { range.from = range.to = t; }
+  else if (k === "yday") { range.from = range.to = addDays(t, -1); }
+  else if (k === "7d") { range.from = addDays(t, -6); range.to = t; }
+  else if (k === "30d") { range.from = addDays(t, -29); range.to = t; }
+  else if (k === "month") { range.from = ymd(new Date(d.getFullYear(), d.getMonth(), 1)); range.to = t; }
+  else if (k === "lmonth") { range.from = ymd(new Date(d.getFullYear(), d.getMonth() - 1, 1)); range.to = ymd(new Date(d.getFullYear(), d.getMonth(), 0)); }
+}
+function rangeBar() {
+  return `<div class="rangebar">
+    <div class="chips">${RANGES.map(([k, l]) => `<button data-r="${k}" aria-pressed="${range.key === k}">${l}</button>`).join("")}</div>
+    <div class="rb-dates"><label>Dari <input type="date" id="rFrom" value="${range.from}" max="${today()}"></label><label>Hingga <input type="date" id="rTo" value="${range.to}" max="${today()}"></label>
+    <span class="muted">${fmtDay(range.from)}${range.from !== range.to ? " – " + fmtDay(range.to) : ""} · ${daysBetween(range.from, range.to)} hari</span></div>
+  </div>`;
+}
+function bindRange(after) {
+  document.querySelectorAll("[data-r]").forEach(b => b.onclick = () => { if (b.dataset.r !== "custom") applyRange(b.dataset.r); else range.key = "custom"; rep = null; after(); });
+  const f = $("#rFrom"), t = $("#rTo");
+  const ch = () => { if (f.value && t.value) { range.key = "custom"; range.from = f.value <= t.value ? f.value : t.value; range.to = f.value <= t.value ? t.value : f.value; rep = null; after(); } };
+  if (f) f.onchange = ch; if (t) t.onchange = ch;
+}
+
+/* ================= KIRA LAPORAN ================= */
+function itemCost(i) {
+  const pid = i.pid || nameToPid(i.name);
+  const base = costs.products?.[pid];
+  if (base == null || base === "") return null;
+  const extra = (i.opts || []).reduce((s, o) => s + (Number(costs.choices?.[o]) || 0), 0);
+  return r2((Number(base) + extra) * i.qty);
+}
+let _n2p = null;
+function nameToPid(name) {
+  if (!_n2p || _n2p.raw !== raw) { _n2p = { raw, m: {} }; (raw?.products || []).forEach(p => _n2p.m[p.name] = p.id); }
+  return _n2p.m[name];
+}
+function catName(i) {
+  if (i.cat) return i.cat;
+  const pid = i.pid || nameToPid(i.name); const p = raw?.products.find(x => x.id === pid);
+  return p ? (raw.cats.find(c => c.id === p.cat)?.name || "Lain-lain") : "Lain-lain";
+}
+function compute(list, from, to) {
+  const valid = list.filter(o => o.paid && o.status !== "cancel");
+  const cancelled = list.filter(o => o.status === "cancel");
+  const pending = list.filter(o => !o.paid && o.status !== "cancel");
+  const R = { orders: valid.length, gross: 0, discount: 0, net: 0, items: 0, cost: 0, costKnownSales: 0, costMissing: new Set(),
+    cancelled: cancelled.length, cancelledValue: r2(cancelled.reduce((s, o) => s + (o.total || 0), 0)), pending: pending.length,
+    byDay: {}, byHour: Array(24).fill(0).map(() => ({ s: 0, n: 0 })), byDow: Array(7).fill(0).map(() => ({ s: 0, n: 0 })),
+    prod: {}, cat: {}, pay: {}, voucher: {}, source: { app: { n: 0, s: 0 }, pos: { n: 0, s: 0 } }, member: { yes: { n: 0, s: 0 }, no: { n: 0, s: 0 } },
+    opts: {}, gifts: 0, giftMsgs: {}, points: 0 };
+  for (let d = from; d <= to; d = addDays(d, 1)) R.byDay[d] = { s: 0, n: 0 };
+  valid.forEach(o => {
+    const sub = o.subtotal ?? o.total, disc = o.discount || 0, net = o.total;
+    R.gross += sub; R.discount += disc; R.net += net; R.points += o.points || 0;
+    const t = new Date(o.paidAt || o.createdAt);
+    if (R.byDay[o.day]) { R.byDay[o.day].s += net; R.byDay[o.day].n++; }
+    R.byHour[t.getHours()].s += net; R.byHour[t.getHours()].n++;
+    R.byDow[parseYmd(o.day).getDay()].s += net; R.byDow[parseYmd(o.day).getDay()].n++;
+    const pm = o.payment?.method || "lain"; (R.pay[pm] ||= { n: 0, s: 0 }); R.pay[pm].n++; R.pay[pm].s += net;
+    const src = o.source === "pos" ? "pos" : "app"; R.source[src].n++; R.source[src].s += net;
+    const mb = o.member ? "yes" : "no"; R.member[mb].n++; R.member[mb].s += net;
+    if (disc) { const k = o.voucherTitle || "Voucher"; (R.voucher[k] ||= { n: 0, d: 0, s: 0 }); R.voucher[k].n++; R.voucher[k].d += disc; R.voucher[k].s += net; }
+    // agih diskaun ikut nilai item untuk untung produk
+    const share = sub > 0 ? disc / sub : 0;
+    (o.items || []).forEach(i => {
+      const line = i.unit * i.qty, netLine = line * (1 - share);
+      R.items += i.qty;
+      const key = i.pid || nameToPid(i.name) || i.name;
+      const p = (R.prod[key] ||= { name: i.name, cat: catName(i), qty: 0, s: 0, net: 0, cost: 0, costOk: true });
+      p.qty += i.qty; p.s += line; p.net += netLine;
+      const c = itemCost(i);
+      if (c == null) { p.costOk = false; R.costMissing.add(i.name); } else { p.cost += c; R.cost += c; R.costKnownSales += netLine; }
+      const cn = catName(i); const cc = (R.cat[cn] ||= { qty: 0, s: 0, net: 0, cost: 0 }); cc.qty += i.qty; cc.s += line; cc.net += netLine; if (c != null) cc.cost += c;
+      (i.opts || []).forEach(op => { R.opts[op] = (R.opts[op] || 0) + i.qty; });
+      if (i.gift?.msg) { R.gifts += i.qty; R.giftMsgs[i.gift.msg] = (R.giftMsgs[i.gift.msg] || 0) + i.qty; }
+    });
+  });
+  R.profit = r2(R.costKnownSales - R.cost);
+  R.margin = R.costKnownSales > 0 ? R.profit / R.costKnownSales * 100 : NaN;
+  R.aov = R.orders ? R.net / R.orders : 0;
+  return R;
+}
+async function loadReport() {
+  if (loadingRep) return; loadingRep = true;
+  try {
+    const len = daysBetween(range.from, range.to);
+    const pFrom = addDays(range.from, -len), pTo = addDays(range.from, -1);
+    const [cur, prev] = await Promise.all([ordersInRange(range.from, range.to), ordersInRange(pFrom, pTo)]);
+    rep = { list: cur, R: compute(cur, range.from, range.to), P: compute(prev, pFrom, pTo), from: range.from, to: range.to, pFrom, pTo };
+  } catch (e) { console.error(e); rep = { error: true }; }
+  loadingRep = false; render();
+}
+
+/* ================= RENDER ================= */
+function render() {
+  charts.forEach(c => c.destroy()); charts = [];
+  const v = $("#view");
+  if (tab === "laporan") return renderReport(v);
+  if (tab === "produk") return renderProducts(v);
+  if (tab === "kategori") return renderCats(v);
+  if (tab === "shift") return renderShifts(v);
+  if (tab === "order") return renderOrders(v);
+}
+
+const delta = (a, b) => { if (!b) return a ? `<span class="dl up">baru</span>` : ""; const d = (a - b) / Math.abs(b) * 100; return `<span class="dl ${d >= 0 ? "up" : "down"}">${d >= 0 ? "▲" : "▼"} ${Math.abs(d).toFixed(0)}%</span>`; };
+function kpi(label, val, sub = "", d = "") { return `<div class="kpi"><span>${label}</span><b class="num">${val}</b><small>${d} ${sub}</small></div>`; }
+function table(head, rows, { cls = "" } = {}) {
+  return `<div class="htable ${cls}"><table><thead><tr>${head.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.length ? rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join("")}</tr>`).join("") : `<tr><td colspan="${head.length}" class="muted">Tiada data untuk tempoh ini.</td></tr>`}</tbody></table></div>`;
+}
+const share = (a, t) => t ? `<span class="bar-in"><i style="width:${Math.max(2, a / t * 100)}%"></i></span><span class="num">${pct(a / t * 100)}</span>` : "—";
+
+function renderReport(v) {
+  if (!rep && !loadingRep) { v.innerHTML = rangeBar() + `<p class="muted pad">Mengira laporan…</p>`; bindRange(render); loadReport(); return; }
+  if (loadingRep || !rep) { v.innerHTML = rangeBar() + `<p class="muted pad">Mengira laporan…</p>`; bindRange(render); return; }
+  if (rep.error) { v.innerHTML = rangeBar() + `<div class="err pad">Tak dapat ambil data. Semak internet dan cuba lagi.</div>`; bindRange(render); return; }
+  const { R, P } = rep;
+  const prods = Object.values(R.prod).sort((a, b) => sortProd === "qty" ? b.qty - a.qty : sortProd === "profit" ? (b.net - b.cost) - (a.net - a.cost) : b.net - a.net);
+  const cats = Object.entries(R.cat).sort((a, b) => b[1].net - a[1].net);
+  const pays = Object.entries(R.pay).sort((a, b) => b[1].s - a[1].s);
+  const vouchers = Object.entries(R.voucher).sort((a, b) => b[1].d - a[1].d);
+  const opts = Object.entries(R.opts).sort((a, b) => b[1] - a[1]).slice(0, 12);
+  const gifts = Object.entries(R.giftMsgs).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  const days = Object.entries(R.byDay);
+  const best = days.reduce((m, d) => d[1].s > (m?.[1].s ?? -1) ? d : m, null);
+  const peak = R.byHour.reduce((m, h, i) => h.s > R.byHour[m].s ? i : m, 0);
+  v.innerHTML = rangeBar() + `
+    <section class="kpis">
+      ${kpi("Jualan bersih", rm(R.net), "vs tempoh sebelum", delta(R.net, P.net))}
+      ${kpi("Order dibayar", R.orders, "", delta(R.orders, P.orders))}
+      ${kpi("Purata setiap order", rm(R.aov), "", delta(R.aov, P.aov))}
+      ${kpi("Item terjual", R.items, "", delta(R.items, P.items))}
+      ${kpi("Untung kasar", R.costKnownSales ? rm(R.profit) : "—", R.costMissing.size ? "sebahagian kos belum diisi" : "", R.costKnownSales ? delta(R.profit, P.profit) : "")}
+      ${kpi("Margin kasar", pct(R.margin), "untung ÷ jualan bersih")}
+      ${kpi("Diskaun / voucher", rm(R.discount), `${Object.values(R.voucher).reduce((s, x) => s + x.n, 0)} order guna voucher`)}
+      ${kpi("Order batal", R.cancelled, R.cancelled ? rm(R.cancelledValue) + " nilai" : "")}
+    </section>
+    ${R.costMissing.size ? `<div class="warnbox">Kos belum diisi untuk: <b>${[...R.costMissing].slice(0, 6).map(esc).join(", ")}${R.costMissing.size > 6 ? "…" : ""}</b>. Untung dan margin hanya dikira untuk produk yang ada kos. Isi kos di tab <a href="#produk" data-go="produk">Produk</a>.</div>` : ""}
+    ${R.pending ? `<p class="muted">${R.pending} order belum dibayar (masih dalam proses) tidak dikira.</p>` : ""}
+
+    <section class="card">
+      <div class="card-h"><h2>Jualan harian</h2><span class="muted">${best && best[1].s ? `Hari terbaik: <b>${fmtDay(best[0])}</b> (${rm(best[1].s)})` : ""}</span></div>
+      <div class="chart-box"><canvas id="cDaily" aria-label="Jualan bersih setiap hari"></canvas></div>
+      <details class="tv"><summary>Lihat jadual</summary>${table(["Tarikh", "Order", "Jualan bersih"], days.map(([d, x]) => [fmtDay(d) + " · " + DAYS[parseYmd(d).getDay()], `<span class="num">${x.n}</span>`, `<span class="num">${rm(x.s)}</span>`]))}</details>
+    </section>
+
+    <div class="grid2">
+      <section class="card"><div class="card-h"><h2>Trend ikut jam</h2><span class="muted">${R.orders ? `Paling sibuk: <b>${String(peak).padStart(2, "0")}:00–${String(peak + 1).padStart(2, "0")}:00</b>` : ""}</span></div>
+        <div class="chart-box sm"><canvas id="cHour" aria-label="Jualan ikut jam"></canvas></div></section>
+      <section class="card"><div class="card-h"><h2>Trend ikut hari</h2></div>
+        <div class="chart-box sm"><canvas id="cDow" aria-label="Jualan ikut hari dalam minggu"></canvas></div></section>
+    </div>
+
+    <section class="card">
+      <div class="card-h"><h2>Jualan ikut produk</h2>
+        <div class="seg mini">${[["sales", "Jualan"], ["qty", "Kuantiti"], ["profit", "Untung"]].map(([k, l]) => `<button data-sp="${k}" aria-pressed="${sortProd === k}">${l}</button>`).join("")}</div>
+        <button class="btn ghost sm" id="csvProd">Muat turun CSV</button></div>
+      ${table(["Produk", "Kategori", "Qty", "Jualan kasar", "Jualan bersih", "Kos", "Untung", "Margin", "Bahagian jualan"],
+        prods.map(p => [esc(p.name), esc(p.cat), `<span class="num">${p.qty}</span>`, `<span class="num">${rm(p.s)}</span>`, `<span class="num">${rm(p.net)}</span>`,
+          p.costOk ? `<span class="num">${rm(p.cost)}</span>` : `<span class="muted">belum isi</span>`, p.costOk ? `<span class="num">${rm(p.net - p.cost)}</span>` : "—",
+          p.costOk && p.net ? `<span class="num">${pct((p.net - p.cost) / p.net * 100)}</span>` : "—", share(p.net, R.net)]))}
+    </section>
+
+    <div class="grid2">
+      <section class="card"><div class="card-h"><h2>Jualan ikut kategori</h2></div>
+        ${table(["Kategori", "Qty", "Jualan bersih", "Untung", "Bahagian"], cats.map(([n, c]) => [esc(n), `<span class="num">${c.qty}</span>`, `<span class="num">${rm(c.net)}</span>`, c.cost ? `<span class="num">${rm(c.net - c.cost)}</span>` : "—", share(c.net, R.net)]))}</section>
+      <section class="card"><div class="card-h"><h2>Jualan ikut cara bayaran</h2></div>
+        ${table(["Cara bayaran", "Order", "Jumlah", "Bahagian"], pays.map(([k, x]) => [esc(PAY[k]?.label || k), `<span class="num">${x.n}</span>`, `<span class="num">${rm(x.s)}</span>`, share(x.s, R.net)]))}</section>
+    </div>
+
+    <div class="grid2">
+      <section class="card"><div class="card-h"><h2>Diskaun &amp; voucher</h2></div>
+        ${table(["Voucher", "Digunakan", "Jumlah diskaun", "Jualan bersih order"], vouchers.map(([k, x]) => [esc(k), `<span class="num">${x.n}</span>`, `<span class="num">${rm(x.d)}</span>`, `<span class="num">${rm(x.s)}</span>`]))}
+        <p class="muted">Kadar guna voucher: <b>${R.orders ? pct(Object.values(R.voucher).reduce((s, x) => s + x.n, 0) / R.orders * 100) : "—"}</b> daripada order · Diskaun = ${R.gross ? pct(R.discount / R.gross * 100) : "—"} daripada jualan kasar.</p></section>
+      <section class="card"><div class="card-h"><h2>Sumber order &amp; ahli</h2></div>
+        ${table(["", "Order", "Jualan", "Purata/order", "Bahagian"], [
+          ["App (pelanggan)", R.source.app.n, rm(R.source.app.s), rm(R.source.app.n ? R.source.app.s / R.source.app.n : 0), share(R.source.app.s, R.net)],
+          ["Kaunter (manual)", R.source.pos.n, rm(R.source.pos.s), rm(R.source.pos.n ? R.source.pos.s / R.source.pos.n : 0), share(R.source.pos.s, R.net)],
+          ["Ahli SIPS", R.member.yes.n, rm(R.member.yes.s), rm(R.member.yes.n ? R.member.yes.s / R.member.yes.n : 0), share(R.member.yes.s, R.net)],
+          ["Tetamu / walk-in", R.member.no.n, rm(R.member.no.s), rm(R.member.no.n ? R.member.no.s / R.member.no.n : 0), share(R.member.no.s, R.net)],
+        ].map(r => r.map((c, i) => i && i < 4 ? `<span class="num">${c}</span>` : c)))}
+        <p class="muted">Point ahli diberi: <b class="num">${R.points}</b> point.</p></section>
+    </div>
+
+    <div class="grid2">
+      <section class="card"><div class="card-h"><h2>Pilihan paling popular</h2></div>
+        ${table(["Pilihan", "Cawan"], opts.map(([k, n]) => [esc(k), `<span class="num">${n}</span>`]))}</section>
+      <section class="card"><div class="card-h"><h2>Ucapan pada cawan ♥</h2></div>
+        <p class="bigline"><b class="num">${R.gifts}</b> cawan dihadiahkan dengan ucapan${R.items ? ` (${pct(R.gifts / R.items * 100)} daripada semua item)` : ""}.</p>
+        ${table(["Ucapan", "Cawan"], gifts.map(([k, n]) => [esc(k), `<span class="num">${n}</span>`]))}</section>
+    </div>`;
+  bindRange(render);
+  document.querySelectorAll("[data-sp]").forEach(b => b.onclick = () => { sortProd = b.dataset.sp; render(); });
+  document.querySelectorAll("[data-go]").forEach(a => a.onclick = e => { e.preventDefault(); setTab(a.dataset.go); });
+  $("#csvProd").onclick = () => csvDownload(`sips-produk-${rep.from}_${rep.to}.csv`, [["Produk", "Kategori", "Qty", "Jualan kasar", "Jualan bersih", "Kos", "Untung", "Margin %"],
+    ...prods.map(p => [p.name, p.cat, p.qty, r2(p.s), r2(p.net), p.costOk ? r2(p.cost) : "", p.costOk ? r2(p.net - p.cost) : "", p.costOk && p.net ? r2((p.net - p.cost) / p.net * 100) : ""])]);
+  drawCharts(R, days);
+}
+function chartTheme() {
+  const cs = getComputedStyle(document.body);
+  return { ink: cs.getPropertyValue("--muted").trim() || "#6f6a5f", grid: cs.getPropertyValue("--line").trim() || "#e2d4bf", bar: cs.getPropertyValue("--accent").trim() || "#1F3D32", font: "Figtree, system-ui, sans-serif" };
+}
+function barChart(id, labels, data, extra, fmt = rm) {
+  const el = document.getElementById(id); if (!el) return;
+  if (!window.Chart) {   // sandaran jika library carta gagal dimuat
+    const max = Math.max(...data, 0) || 1;
+    el.parentElement.classList.add("fb");
+    el.parentElement.innerHTML = `<div class="fbars">${labels.map((l, i) => `<div class="fb-c" title="${esc(l)}: ${fmt(data[i])}${extra ? " · " + esc(extra[i]) : ""}"><span class="fb-v num">${data[i] ? fmt(data[i]).replace("RM", "") : ""}</span><i style="height:${Math.max(data[i] ? 3 : 0, data[i] / max * 100)}%"></i><span class="fb-l">${esc(l)}</span></div>`).join("")}</div>`;
+    return;
+  }
+  const t = chartTheme();
+  charts.push(new Chart(el, {
+    type: "bar",
+    data: { labels, datasets: [{ data, backgroundColor: t.bar, hoverBackgroundColor: t.bar, borderRadius: { topLeft: 4, topRight: 4 }, borderSkipped: "bottom", maxBarThickness: 28, categoryPercentage: .8, barPercentage: .9 }] },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: { duration: 250 },
+      plugins: { legend: { display: false }, tooltip: { displayColors: false, callbacks: { label: c => fmt(c.parsed.y) + (extra ? " · " + extra[c.dataIndex] : "") } } },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: t.ink, font: { family: t.font, size: 11 }, maxRotation: 0, autoSkipPadding: 8 }, border: { color: t.grid } },
+        y: { beginAtZero: true, grid: { color: t.grid }, border: { display: false }, ticks: { color: t.ink, font: { family: t.font, size: 11 }, maxTicksLimit: 5, callback: v => "RM" + v } },
+      },
+    },
+  }));
+}
+function drawCharts(R, days) {
+  barChart("cDaily", days.map(([d]) => fmtDay(d)), days.map(([, x]) => r2(x.s)), days.map(([, x]) => x.n + " order"));
+  const hrs = R.byHour.map((h, i) => [i, h]).filter(([i, h]) => h.n || (i >= 8 && i <= 22));
+  barChart("cHour", hrs.map(([i]) => String(i).padStart(2, "0")), hrs.map(([, h]) => r2(h.s)), hrs.map(([, h]) => h.n + " order"));
+  const order = [1, 2, 3, 4, 5, 6, 0];
+  barChart("cDow", order.map(i => DAYS[i].slice(0, 3)), order.map(i => r2(R.byDow[i].s)), order.map(i => R.byDow[i].n + " order"));
+}
+
+/* ================= PRODUK ================= */
+function needImport() {
+  if (menuSource !== "config") return "";
+  return `<div class="import-box"><div><b>Menu masih dari fail config.js.</b><br>Salin menu ke Firebase sekali sahaja supaya produk boleh ditambah dan diubah di sini, dan stok boleh ditanda habis oleh staff.</div><button class="btn" id="impBtn">Salin menu ke Firebase</button></div>`;
+}
+function bindImport() {
+  const b = $("#impBtn"); if (!b) return;
+  b.onclick = async () => { b.disabled = true; b.textContent = "Menyalin…"; try { await importDefaultMenu(); toast("Menu disalin ke Firebase."); } catch (e) { console.error(e); toast("Tak berjaya salin menu. Pastikan akaun ini admin."); b.disabled = false; b.textContent = "Salin menu ke Firebase"; } };
+}
+function renderProducts(v) {
+  if (!raw) { v.innerHTML = `<p class="muted pad">Memuatkan produk…</p>`; return; }
+  const menu = buildMenu(raw, { includeHidden: true });
+  v.innerHTML = `${needImport()}
+    <div class="toolbar"><h1>Produk</h1><button class="btn" id="newP" ${menuSource === "config" ? "disabled" : ""}>＋ Produk baru</button></div>
+    ${menu.map(c => `<section class="card"><div class="card-h"><h2>${esc(c.cat)}</h2><span class="muted">${c.items.length} produk</span></div>
+      ${table(["", "Produk", "Harga", "Kos", "Margin", "Paparan", "Stok", ""], c.items.map(p => {
+        const cost = costs.products?.[p.id]; const hasCost = cost != null && cost !== "";
+        return [`<span class="thumb">${p.img ? `<img src="${esc(p.img)}" alt="">` : `<i style="background:${esc(p.color)}"></i>`}</span>`,
+          `<b>${esc(p.name)}</b><br><small class="muted">${p.opts.map(o => esc(o.label)).join(", ") || "Tiada pilihan"}${p.food ? " · makanan" : ""}</small>`,
+          `<span class="num">${rm(p.price)}</span>`, hasCost ? `<span class="num">${rm(cost)}</span>` : `<span class="muted">—</span>`,
+          hasCost && p.price ? `<span class="num">${pct((p.price - cost) / p.price * 100)}</span>` : "—",
+          p.active ? `<span class="pill paid">Dipapar</span>` : `<span class="pill">Disembunyi</span>`,
+          p.soldOut ? `<span class="pill unpaid">Habis</span>` : `<span class="pill paid">Ada</span>`,
+          `<button class="btn ghost sm" data-edit="${p.id}" ${menuSource === "config" ? "disabled" : ""}>Edit</button>`];
+      }))}</section>`).join("")}`;
+  bindImport();
+  const np = $("#newP"); if (np) np.onclick = () => editProduct(null);
+  document.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => editProduct(b.dataset.edit));
+}
+async function compressImage(file) {
+  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(file); });
+  const S = 480, s = Math.min(1, S / Math.max(img.width, img.height));
+  const c = document.createElement("canvas"); c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+  let q = .8, url = c.toDataURL("image/webp", q);
+  if (!url.startsWith("data:image/webp")) url = c.toDataURL("image/jpeg", q);
+  while (url.length > 180000 && q > .4) { q -= .1; url = c.toDataURL(url.startsWith("data:image/webp") ? "image/webp" : "image/jpeg", q); }
+  return url;
+}
+function editProduct(id) {
+  const p0 = id ? raw.products.find(p => p.id === id) : null;
+  const p = p0 ? { ...p0, tags: [...(p0.tags || [])], optIds: [...(p0.optIds || [])] } :
+    { name: "", desc: "", price: "", cat: raw.cats[0]?.id || "", color: "#e6d2ae", img: "", imgData: "", tags: [], optIds: [], food: false, active: true, soldOut: false, sort: (raw.products.length + 1) };
+  let cost = id ? (costs.products?.[id] ?? "") : "", err = "", confirmDel = false, busy = false;
+  const groups = [...raw.groups].sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0));
+  const draw = () => {
+    const price = num(p.price), c = num(cost), m = !isNaN(price) && !isNaN(c) && price ? (price - c) / price * 100 : NaN;
+    const sh = openModal(`
+      <h2>${id ? "Edit produk" : "Produk baru"}</h2>
+      <div class="pe">
+        <div class="pe-img">
+          <div class="pe-pic">${p.imgData || p.img ? `<img src="${esc(p.imgData || p.img)}" alt="">` : `<i style="background:${esc(p.color)}"></i>`}</div>
+          <label class="btn ghost sm filebtn">Pilih gambar<input type="file" id="pImg" accept="image/*" hidden></label>
+          ${p.imgData || p.img ? `<button class="linkish" id="pImgX">Buang gambar</button>` : ""}
+          <small class="muted">Gambar dikecilkan automatik (maks. 480px).</small>
+          <label class="field"><span>Warna ilustrasi (tanpa gambar)</span><input type="color" id="pColor" value="${esc(p.color || "#e6d2ae")}"></label>
+        </div>
+        <div class="pe-f">
+          <label class="field"><span>Nama produk</span><input type="text" id="pName" maxlength="40" value="${esc(p.name)}"></label>
+          <label class="field"><span>Penerangan</span><input type="text" id="pDesc" maxlength="90" value="${esc(p.desc)}"></label>
+          <div class="pe-2">
+            <label class="field"><span>Kategori</span><select id="pCat">${raw.cats.map(c => `<option value="${c.id}" ${p.cat === c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></label>
+            <label class="field"><span>Susunan</span><input type="number" id="pSort" value="${esc(p.sort ?? "")}"></label>
+          </div>
+          <div class="pe-2">
+            <label class="field"><span>Harga jual (RM)</span><input type="text" inputmode="decimal" id="pPrice" value="${esc(p.price)}"></label>
+            <label class="field"><span>Kos seunit (RM) <small class="muted">rahsia, admin sahaja</small></span><input type="text" inputmode="decimal" id="pCost" value="${esc(cost)}"></label>
+          </div>
+          <p class="muted" id="pMargin">${isNaN(m) ? "Isi harga dan kos untuk lihat margin." : `Untung seunit <b>${rm(price - c)}</b> · margin <b>${pct(m)}</b>`}</p>
+          <label class="field"><span>Label (asingkan dengan koma)</span><input type="text" id="pTags" value="${esc(p.tags.join(", "))}" placeholder="Cth: Semula jadi, Kegemaran ramai"></label>
+          <div class="opt"><label class="t">Pilihan untuk produk ini</label><div class="checks">${groups.map(g => `<label><input type="checkbox" data-og="${g.id}" ${p.optIds.includes(g.id) ? "checked" : ""}> ${esc(g.name)} <small class="muted">(${(g.choices || []).map(x => esc(x.n)).join(" / ")})</small></label>`).join("") || `<span class="muted">Belum ada kumpulan pilihan. Tambah di tab Kategori &amp; pilihan.</span>`}</div></div>
+          <div class="checks row">
+            <label><input type="checkbox" id="pActive" ${p.active !== false ? "checked" : ""}> Papar dalam menu</label>
+            <label><input type="checkbox" id="pSold" ${p.soldOut ? "checked" : ""}> Stok habis</label>
+            <label><input type="checkbox" id="pFood" ${p.food ? "checked" : ""}> Makanan (bukan minuman)</label>
+          </div>
+        </div>
+      </div>
+      ${err ? `<div class="err">${esc(err)}</div>` : ""}
+      <div class="sheet-foot">
+        ${id ? (confirmDel ? `<span class="muted">Padam produk ini?</span><button class="btn" style="background:var(--new);color:#fff" id="pDelY">Ya, padam</button><button class="btn ghost" id="pDelN">Tak</button>` : `<button class="btn ghost" id="pDel" style="color:var(--new)">Padam</button>`) : ""}
+        <button class="btn ghost" id="pX" style="margin-left:auto">Batal</button><button class="btn" id="pSave" ${busy ? "disabled" : ""}>${busy ? "Menyimpan…" : "Simpan"}</button>
+      </div>`, { wide: true });
+    const keep = () => {
+      p.name = $("#pName").value.trim(); p.desc = $("#pDesc").value.trim(); p.cat = $("#pCat").value; p.sort = Number($("#pSort").value) || 0;
+      p.price = $("#pPrice").value.trim(); cost = $("#pCost").value.trim(); p.color = $("#pColor").value;
+      p.tags = $("#pTags").value.split(",").map(s => s.trim()).filter(Boolean).slice(0, 4);
+      p.optIds = [...sh.querySelectorAll("[data-og]")].filter(x => x.checked).map(x => x.dataset.og);
+      p.active = $("#pActive").checked; p.soldOut = $("#pSold").checked; p.food = $("#pFood").checked;
+    };
+    ["#pPrice", "#pCost"].forEach(s => $(s).oninput = () => { const a = num($("#pPrice").value), b = num($("#pCost").value); $("#pMargin").innerHTML = isNaN(a) || isNaN(b) || !a ? "Isi harga dan kos untuk lihat margin." : `Untung seunit <b>${rm(a - b)}</b> · margin <b>${pct((a - b) / a * 100)}</b>`; });
+    $("#pImg").onchange = async e => { const f = e.target.files[0]; if (!f) return; keep(); try { p.imgData = await compressImage(f); p.img = ""; } catch (x) { err = "Gambar tak dapat dibaca."; } draw(); };
+    const ix = $("#pImgX"); if (ix) ix.onclick = () => { keep(); p.imgData = ""; p.img = ""; draw(); };
+    $("#pX").onclick = closeModal;
+    const pd = $("#pDel"); if (pd) pd.onclick = () => { keep(); confirmDel = true; draw(); };
+    const pn = $("#pDelN"); if (pn) pn.onclick = () => { confirmDel = false; draw(); };
+    const py = $("#pDelY"); if (py) py.onclick = async () => { try { await deleteMenuItem("products", id); const cc = { ...costs, products: { ...costs.products } }; delete cc.products[id]; await saveCosts(cc); costs = cc; closeModal(); toast("Produk dipadam."); render(); } catch (e) { err = "Tak berjaya padam."; confirmDel = false; draw(); } };
+    $("#pSave").onclick = async () => {
+      keep();
+      const price = num(p.price), c = cost === "" ? "" : num(cost);
+      if (!p.name) { err = "Sila isi nama produk."; draw(); return; }
+      if (isNaN(price) || price < 0) { err = "Harga jual tak sah."; draw(); return; }
+      if (c !== "" && (isNaN(c) || c < 0)) { err = "Kos tak sah."; draw(); return; }
+      if (!p.cat) { err = "Sila tambah kategori dulu di tab Kategori & pilihan."; draw(); return; }
+      busy = true; draw();
+      try {
+        const body = { name: p.name, desc: p.desc, price, cat: p.cat, color: p.color, img: p.img || "", imgData: p.imgData || "", tags: p.tags, optIds: p.optIds, food: p.food, active: p.active, soldOut: p.soldOut, sort: p.sort };
+        const pid = await saveMenuItem("products", id ? { ...body, id } : body);
+        const cc = { ...costs, products: { ...costs.products } };
+        if (c === "") delete cc.products[pid]; else cc.products[pid] = c;
+        await saveCosts(cc); costs = cc;
+        closeModal(); toast(id ? "Produk dikemaskini." : "Produk ditambah."); render();
+      } catch (e) { console.error(e); busy = false; err = "Tak berjaya simpan. Pastikan akaun ini admin dan rules dah dikemaskini."; draw(); }
+    };
+  };
+  draw();
+}
+
+/* ================= KATEGORI & PILIHAN ================= */
+function renderCats(v) {
+  if (!raw) { v.innerHTML = `<p class="muted pad">Memuatkan…</p>`; return; }
+  const cats = [...raw.cats].sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0));
+  const groups = [...raw.groups].sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0));
+  const dis = menuSource === "config" ? "disabled" : "";
+  v.innerHTML = `${needImport()}
+    <div class="grid2">
+      <section class="card"><div class="card-h"><h2>Kategori</h2><button class="btn sm" id="newC" ${dis}>＋ Kategori</button></div>
+        ${table(["Susunan", "Nama", "Produk", ""], cats.map(c => [`<span class="num">${c.sort ?? ""}</span>`, esc(c.name), `<span class="num">${raw.products.filter(p => p.cat === c.id).length}</span>`, `<button class="btn ghost sm" data-ec="${c.id}" ${dis}>Edit</button>`]))}</section>
+      <section class="card"><div class="card-h"><h2>Kumpulan pilihan</h2><button class="btn sm" id="newG" ${dis}>＋ Kumpulan</button></div>
+        <p class="muted">Contoh: Suhu, Saiz, Tahap manis. Setiap pilihan boleh ada harga tambahan dan kos tambahan.</p>
+        ${table(["Nama", "Pilihan", ""], groups.map(g => [esc(g.name), (g.choices || []).map((x, i) => `${esc(x.n)}${x.p ? ` <small>+${rm(x.p)}</small>` : ""}${i === (g.def || 0) ? " <small class='muted'>(asal)</small>" : ""}`).join(" · "), `<button class="btn ghost sm" data-eg="${g.id}" ${dis}>Edit</button>`]))}</section>
+    </div>`;
+  bindImport();
+  const nc = $("#newC"); if (nc) nc.onclick = () => editCat(null);
+  const ng = $("#newG"); if (ng) ng.onclick = () => editGroup(null);
+  document.querySelectorAll("[data-ec]").forEach(b => b.onclick = () => editCat(b.dataset.ec));
+  document.querySelectorAll("[data-eg]").forEach(b => b.onclick = () => editGroup(b.dataset.eg));
+}
+function editCat(id) {
+  const c = id ? { ...raw.cats.find(x => x.id === id) } : { name: "", sort: raw.cats.length + 1 };
+  const used = id ? raw.products.filter(p => p.cat === id).length : 0;
+  let err = "";
+  const draw = () => {
+    openModal(`<h2>${id ? "Edit kategori" : "Kategori baru"}</h2>
+      <label class="field"><span>Nama kategori</span><input type="text" id="cName" maxlength="30" value="${esc(c.name)}"></label>
+      <label class="field"><span>Susunan (kecil dipapar dulu)</span><input type="number" id="cSort" value="${esc(c.sort)}"></label>
+      ${err ? `<div class="err">${esc(err)}</div>` : ""}
+      <div class="sheet-foot">${id ? `<button class="btn ghost" id="cDel" style="color:var(--new)" ${used ? `disabled title="Masih ada ${used} produk"` : ""}>Padam</button>` : ""}<button class="btn ghost" id="cX" style="margin-left:auto">Batal</button><button class="btn" id="cSave">Simpan</button></div>
+      ${used ? `<p class="muted">Kategori ini ada ${used} produk. Pindahkan produk dulu sebelum padam.</p>` : ""}`);
+    $("#cX").onclick = closeModal;
+    const d = $("#cDel"); if (d) d.onclick = async () => { await deleteMenuItem("cats", id).catch(() => {}); closeModal(); toast("Kategori dipadam."); };
+    $("#cSave").onclick = async () => {
+      c.name = $("#cName").value.trim(); c.sort = Number($("#cSort").value) || 0;
+      if (!c.name) { err = "Sila isi nama."; draw(); return; }
+      try { await saveMenuItem("cats", id ? { name: c.name, sort: c.sort, id } : { name: c.name, sort: c.sort }); closeModal(); toast("Kategori disimpan."); }
+      catch (e) { err = "Tak berjaya simpan."; draw(); }
+    };
+  };
+  draw();
+}
+function editGroup(id) {
+  const g0 = id ? raw.groups.find(x => x.id === id) : null;
+  const g = { name: g0?.name || "", sort: g0?.sort ?? raw.groups.length + 1, def: g0?.def || 0, choices: (g0?.choices || [{ n: "", p: 0 }]).map(x => ({ ...x, c: costs.choices?.[x.n] ?? "" })) };
+  const used = id ? raw.products.filter(p => (p.optIds || []).includes(id)).length : 0;
+  let err = "";
+  const draw = () => {
+    const sh = openModal(`<h2>${id ? "Edit kumpulan pilihan" : "Kumpulan pilihan baru"}</h2>
+      <div class="pe-2"><label class="field"><span>Nama kumpulan</span><input type="text" id="gName" maxlength="30" value="${esc(g.name)}" placeholder="Cth: Saiz"></label>
+      <label class="field"><span>Susunan</span><input type="number" id="gSort" value="${esc(g.sort)}"></label></div>
+      <div class="opt"><label class="t">Pilihan</label>
+        <div class="ch-rows"><div class="ch-h"><span>Nama pilihan</span><span>Harga tambahan (RM)</span><span>Kos tambahan (RM)</span><span>Asal</span><span></span></div>
+        ${g.choices.map((x, i) => `<div class="ch-r"><input type="text" data-cn="${i}" value="${esc(x.n)}" placeholder="Cth: Large"><input type="text" inputmode="decimal" data-cp="${i}" value="${esc(x.p || "")}" placeholder="0"><input type="text" inputmode="decimal" data-cc="${i}" value="${esc(x.c)}" placeholder="0"><input type="radio" name="gdef" data-cd="${i}" ${g.def === i ? "checked" : ""} aria-label="Pilihan asal"><button class="btn ghost sm" data-cx="${i}" ${g.choices.length < 2 ? "disabled" : ""}>×</button></div>`).join("")}
+        </div><button class="linkish" id="gAdd">＋ Tambah pilihan</button></div>
+      ${used ? `<p class="muted">Digunakan oleh ${used} produk.</p>` : ""}
+      ${err ? `<div class="err">${esc(err)}</div>` : ""}
+      <div class="sheet-foot">${id ? `<button class="btn ghost" id="gDel" style="color:var(--new)">Padam</button>` : ""}<button class="btn ghost" id="gX" style="margin-left:auto">Batal</button><button class="btn" id="gSave">Simpan</button></div>`, { wide: true });
+    const keep = () => {
+      g.name = $("#gName").value.trim(); g.sort = Number($("#gSort").value) || 0;
+      g.choices.forEach((x, i) => { x.n = sh.querySelector(`[data-cn="${i}"]`).value.trim(); x.p = num(sh.querySelector(`[data-cp="${i}"]`).value) || 0; x.c = sh.querySelector(`[data-cc="${i}"]`).value.trim(); if (sh.querySelector(`[data-cd="${i}"]`).checked) g.def = i; });
+    };
+    $("#gAdd").onclick = () => { keep(); g.choices.push({ n: "", p: 0, c: "" }); draw(); };
+    sh.querySelectorAll("[data-cx]").forEach(b => b.onclick = () => { keep(); g.choices.splice(+b.dataset.cx, 1); if (g.def >= g.choices.length) g.def = 0; draw(); });
+    $("#gX").onclick = closeModal;
+    const d = $("#gDel"); if (d) d.onclick = async () => { await deleteMenuItem("groups", id).catch(() => {}); closeModal(); toast("Kumpulan pilihan dipadam."); };
+    $("#gSave").onclick = async () => {
+      keep();
+      const ch = g.choices.filter(x => x.n);
+      if (!g.name || !ch.length) { err = "Isi nama kumpulan dan sekurang-kurangnya satu pilihan."; draw(); return; }
+      try {
+        await saveMenuItem("groups", { ...(id ? { id } : {}), name: g.name, sort: g.sort, def: Math.min(g.def, ch.length - 1), choices: ch.map(x => ({ n: x.n, p: x.p || 0 })) });
+        const cc = { ...costs, choices: { ...costs.choices } };
+        ch.forEach(x => { const v = num(x.c); if (x.c === "" || isNaN(v)) delete cc.choices[x.n]; else cc.choices[x.n] = v; });
+        await saveCosts(cc); costs = cc;
+        closeModal(); toast("Kumpulan pilihan disimpan.");
+      } catch (e) { console.error(e); err = "Tak berjaya simpan."; draw(); }
+    };
+  };
+  draw();
+}
+
+/* ================= SHIFT ================= */
+let shiftData = null;
+async function renderShifts(v) {
+  v.innerHTML = rangeBar() + `<p class="muted pad">Memuatkan shift…</p>`;
+  bindRange(() => { shiftData = null; render(); });
+  const fromTs = parseYmd(range.from).getTime(), toTs = parseYmd(range.to).getTime() + 864e5 - 1;
+  try { shiftData = await shiftsInRange(fromTs, toTs); } catch (e) { v.innerHTML = rangeBar() + `<div class="err pad">Tak dapat ambil data shift.</div>`; bindRange(render); return; }
+  if (tab !== "shift") return;
+  const L = shiftData, closed = L.filter(s => s.status === "closed");
+  const tot = k => r2(closed.reduce((s, x) => s + (x.totals?.[k] || 0), 0));
+  const varSum = r2(closed.reduce((s, x) => s + (x.variance || 0), 0));
+  v.innerHTML = rangeBar() + `
+    <section class="kpis">
+      ${kpi("Shift", L.length, L.length - closed.length ? `${L.length - closed.length} masih dibuka` : "")}
+      ${kpi("Jualan shift", rm(closed.reduce((s, x) => s + (x.sales || 0), 0)))}
+      ${kpi("CASH", rm(tot("cash")))}${kpi("QRPay", rm(tot("qr")))}${kpi("Kad", rm(tot("card")))}
+      ${kpi("Jumlah beza tunai", (varSum > 0 ? "+" : varSum < 0 ? "−" : "") + rm(Math.abs(varSum)), closed.filter(x => x.variance).length + " shift ada beza")}
+    </section>
+    <section class="card"><div class="card-h"><h2>Senarai shift</h2></div>
+    ${table(["Dibuka", "Ditutup", "Staff", "Duit awal", "Order", "CASH", "QR", "Kad", "Jualan", "Tunai dijangka", "Dikira", "Beza", "Catatan"],
+      L.map(s => [dtm(s.openedAt), s.status === "closed" ? dtm(s.closedAt) : "<b>Masih dibuka</b>", esc(s.staffName || ""), rm(s.openingCash || 0), s.orderCount ?? "—",
+        s.totals ? rm(s.totals.cash) : "—", s.totals ? rm(s.totals.qr) : "—", s.totals ? rm(s.totals.card) : "—", s.sales != null ? rm(s.sales) : "—",
+        s.expectedCash != null ? rm(s.expectedCash) : "—", s.countedCash != null ? rm(s.countedCash) : "—",
+        s.variance != null ? `<span class="${s.variance < 0 ? "neg" : s.variance > 0 ? "pos" : ""}">${s.variance > 0 ? "+" : s.variance < 0 ? "−" : ""}${rm(Math.abs(s.variance))}</span>` : "—", esc(s.note || "")]))}
+    </section>`;
+  bindRange(() => { shiftData = null; render(); });
+}
+
+/* ================= ORDER ================= */
+let orderData = null, orderKey = "";
+async function renderOrders(v) {
+  const key = range.from + range.to;
+  if (!orderData || orderKey !== key) {
+    v.innerHTML = rangeBar() + `<p class="muted pad">Memuatkan order…</p>`; bindRange(render);
+    try { orderData = await ordersInRange(range.from, range.to); orderKey = key; } catch (e) { v.innerHTML = rangeBar() + `<div class="err pad">Tak dapat ambil order.</div>`; bindRange(render); return; }
+    if (tab !== "order") return;
+  }
+  const f = orderFilter, q = f.q.toLowerCase();
+  const stLabel = o => o.status === "cancel" ? "Batal" : o.status === "done" ? "Selesai" : o.paid ? "Dibayar" : "Dalam proses";
+  const L = orderData.filter(o => (f.status === "all" || (f.status === "done" ? o.status === "done" : f.status === "cancel" ? o.status === "cancel" : !["done", "cancel"].includes(o.status)))
+    && (f.source === "all" || (f.source === "pos" ? o.source === "pos" : o.source !== "pos"))
+    && (f.pay === "all" || o.payment?.method === f.pay)
+    && (!q || (o.name || "").toLowerCase().includes(q) || pad3(o.no).includes(q) || (o.items || []).some(i => i.name.toLowerCase().includes(q))))
+    .sort((a, b) => b.createdAt - a.createdAt);
+  v.innerHTML = rangeBar() + `
+    <div class="filters">
+      <label>Status <select id="fSt"><option value="all">Semua</option><option value="done">Selesai</option><option value="open">Dalam proses</option><option value="cancel">Batal</option></select></label>
+      <label>Sumber <select id="fSrc"><option value="all">Semua</option><option value="app">App</option><option value="pos">Kaunter</option></select></label>
+      <label>Bayaran <select id="fPay"><option value="all">Semua</option>${PAYMENTS.map(p => `<option value="${p.id}">${esc(p.label)}</option>`).join("")}</select></label>
+      <label class="grow">Cari <input type="search" id="fQ" value="${esc(f.q)}" placeholder="Nama, no. order atau produk"></label>
+      <button class="btn ghost sm" id="csvO">Muat turun CSV</button>
+    </div>
+    <p class="muted">${L.length} order · ${rm(L.filter(o => o.paid && o.status !== "cancel").reduce((s, o) => s + o.total, 0))} dibayar</p>
+    ${table(["Tarikh", "No", "Nama", "Sumber", "Item", "Diskaun", "Jumlah", "Bayaran", "Status", ""],
+      L.slice(0, 300).map(o => [dtm(o.createdAt), `<b class="num">#${pad3(o.no)}</b>`, esc(o.name || "—"), o.source === "pos" ? "Kaunter" : "App", (o.items || []).reduce((s, i) => s + i.qty, 0),
+        o.discount ? `<span class="num">-${rm(o.discount)}</span>` : "", `<span class="num">${rm(o.total)}</span>`, o.paid ? esc(PAY[o.payment?.method]?.short || "-") : "—", stLabel(o), `<button class="btn ghost sm" data-ov="${o.id}">Lihat</button>`]))}
+    ${L.length > 300 ? `<p class="muted">Menunjukkan 300 order terkini. Muat turun CSV untuk senarai penuh.</p>` : ""}`;
+  bindRange(render);
+  $("#fSt").value = f.status; $("#fSrc").value = f.source; $("#fPay").value = f.pay;
+  $("#fSt").onchange = e => { f.status = e.target.value; render(); };
+  $("#fSrc").onchange = e => { f.source = e.target.value; render(); };
+  $("#fPay").onchange = e => { f.pay = e.target.value; render(); };
+  let t; $("#fQ").oninput = e => { clearTimeout(t); t = setTimeout(() => { f.q = e.target.value; render(); setTimeout(() => { const i = $("#fQ"); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }, 0); }, 300); };
+  $("#csvO").onclick = () => csvDownload(`sips-order-${range.from}_${range.to}.csv`, [["Tarikh", "Masa", "No", "Nama", "Telefon", "Sumber", "Ahli", "Item", "Subtotal", "Diskaun", "Voucher", "Jumlah", "Bayaran", "Tunai diterima", "Baki", "Status"],
+    ...L.map(o => [o.day, tm(o.createdAt), o.no, o.name || "", o.phone || "", o.source === "pos" ? "Kaunter" : "App", o.member ? "Ya" : "Tidak",
+      (o.items || []).map(i => `${i.qty}x ${i.name}${i.opts?.length ? " (" + i.opts.join("/") + ")" : ""}`).join("; "), o.subtotal ?? o.total, o.discount || 0, o.voucherTitle || "", o.total,
+      o.paid ? (PAY[o.payment?.method]?.label || "") : "", o.payment?.tendered ?? "", o.payment?.change ?? "", stLabel(o)])]);
+  document.querySelectorAll("[data-ov]").forEach(b => b.onclick = () => viewOrder(orderData.find(o => o.id === b.dataset.ov)));
+}
+function viewOrder(o) {
+  openModal(`<h2>Order #${pad3(o.no)}</h2><div class="sub">${dtm(o.createdAt)} · ${o.source === "pos" ? "Kaunter" : "App"}${o.member ? " · Ahli" : ""}</div>
+    <p><b>${esc(o.name || "—")}</b>${o.phone ? " · " + esc(o.phone) : ""}</p>
+    ${table(["Item", "Qty", "Harga", "Jumlah"], (o.items || []).map(i => [`${esc(i.name)}${i.opts?.length ? `<br><small class="muted">${esc(i.opts.join(" · "))}</small>` : ""}${i.note ? `<br><small>Nota: ${esc(i.note)}</small>` : ""}${i.gift?.msg ? `<br><small class="giftline">♥ ${i.gift.to ? "Untuk " + esc(i.gift.to) + ": " : ""}“${esc(i.gift.msg)}”${i.gift.from ? " — " + esc(i.gift.from) : ""}</small>` : ""}`, i.qty, rm(i.unit), rm(i.unit * i.qty)]))}
+    <div class="sumgrid">
+      <div><span>Subtotal</span><b class="num">${rm(o.subtotal ?? o.total)}</b></div>
+      <div><span>Diskaun${o.voucherTitle ? " · " + esc(o.voucherTitle) : ""}</span><b class="num">${o.discount ? "-" + rm(o.discount) : "—"}</b></div>
+      <div class="hl"><span>Jumlah</span><b class="num">${rm(o.total)}</b></div>
+      <div><span>Bayaran</span><b>${o.paid ? esc(PAY[o.payment?.method]?.label || "-") : "Belum bayar"}</b></div>
+      <div><span>Status</span><b>${o.status === "cancel" ? "Batal" : o.status === "done" ? "Selesai" : "Dalam proses"}</b></div>
+      ${o.payment?.method === "cash" ? `<div><span>Tunai / baki</span><b class="num">${rm(o.payment.tendered)} / ${rm(o.payment.change)}</b></div>` : ""}
+      ${o.pointsAwarded ? `<div><span>Point diberi</span><b class="num">+${o.points}</b></div>` : ""}
+    </div>
+    <div class="sheet-foot"><button class="btn wide" id="ovX"><span>Tutup</span><span>✓</span></button></div>`, { wide: true });
+  $("#ovX").onclick = closeModal;
+}
+
+staffWatch((staff, reason) => {
+  if (!staff || staff.role !== "admin") {
+    $("#login").hidden = false; $("#app").hidden = true; $("#who").hidden = true;
+    if (staff && staff.role !== "admin") { $("#lErr").innerHTML = `Akaun <b>${esc(staff.email)}</b> ialah staff biasa, bukan admin. Untuk jadikan admin: Firebase → Firestore → koleksi <b>staff</b> → dokumen emel ini → tukar field <b>role</b> kepada <b>admin</b>. <button class="btn ghost sm" id="lo2" type="button">Log keluar</button>`; $("#lErr").hidden = false; $("#lo2").onclick = () => staffLogout(); }
+    else if (reason) { $("#lErr").textContent = reason; $("#lErr").hidden = false; }
+    return;
+  }
+  me = staff;
+  $("#login").hidden = true; $("#app").hidden = false;
+  $("#who").hidden = false; $("#who").innerHTML = `${esc(staff.email)} <a class="who-link" href="outlet.html">Dashboard outlet</a> <button id="logout">Log keluar</button>`;
+  $("#logout").onclick = () => staffLogout();
+  if (!started) { started = true; start(); }
+});
+</script>
+</body>
+</html>

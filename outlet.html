@@ -38,9 +38,9 @@
 <div id="printArea" aria-hidden="true"></div>
 
 <script type="module">
-import { OUTLET, MENU, PAYMENTS, LABEL, GIFT } from "./config.js";
+import { OUTLET, PAYMENTS, LABEL, GIFT } from "./config.js";
 import { LIVE, today, pointsFor, staffWatch, staffLogin, staffLogout, watchOrders, updateOrder, deleteOrder, completeOrder, cancelOrder,
-  watchShift, openShift, closeShift, shiftSummary, listShifts, createPosOrder } from "./data.js";
+  watchMenu, buildMenu, setSoldOut, watchShift, openShift, closeShift, shiftSummary, listShifts, createPosOrder } from "./data.js";
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -52,7 +52,12 @@ const pad3 = n => String(n).padStart(3, "0");
 const num = v => { const n = parseFloat(String(v).replace(",", ".")); return isFinite(n) ? r2(n) : NaN; };
 const ls = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} } };
 const PAY = Object.fromEntries(PAYMENTS.map(p => [p.id, p]));
-const ITEM = {}; MENU.forEach(c => c.items.forEach(i => ITEM[i.id] = i));
+let MENU = [], ITEM = {}, menuSource = "config", stockOpen = false;
+queueMicrotask(() => watchMenu(({ raw, source }) => {
+  menuSource = source; MENU = buildMenu(raw); ITEM = {}; MENU.forEach(c => c.items.forEach(i => ITEM[i.id] = i));
+  if (!$("#modal").innerHTML) { if (started) render(); } else if (pos && $("#modal .pos")) drawPOS();
+}));
+const catOf = id => (MENU.find(c => c.items.some(i => i.id === id)) || {}).cat || "";
 
 if (!LIVE) { $("#banner").hidden = false; $("#bannerText").innerHTML = "<span><b>Mod demo.</b> Kata laluan: <b>1234</b>. Order dari index.html dalam browser yang sama akan muncul di sini.</span>"; }
 
@@ -173,6 +178,10 @@ function render() {
       </tbody></table>` : `<p style="color:var(--muted)">Belum ada.</p>`}</div>
       <div class="danger">${confirmClear ? `<span>Padam semua order hari ini? Tak boleh undo.</span><button class="btn" style="background:var(--new);color:#fff" id="clrYes">Ya, padam</button><button class="btn ghost" id="clrNo">Batal</button>` : `<button class="btn ghost" id="clr">Kosongkan order hari ini</button>`}</div>
     </details>
+    <details class="hist" id="stock" ${stockOpen ? "open" : ""}><summary>Stok menu ${MENU.reduce((n, c) => n + c.items.filter(i => i.soldOut).length, 0) ? `<span class="pill unpaid">${MENU.reduce((n, c) => n + c.items.filter(i => i.soldOut).length, 0)} habis</span>` : ""}</summary>
+      <p class="muted">Tekan untuk tanda item <b>habis</b>. Item yang habis tak boleh dipesan oleh pelanggan dan dalam order manual, sehingga ditanda <b>ada</b> semula.${menuSource === "config" ? " <br><b>Nota:</b> menu masih guna contoh dari config.js. Buka page admin dan tekan “Salin menu ke Firebase” supaya stok boleh diubah." : ""}</p>
+      <div class="stock-grid">${MENU.map(c => `<div class="stock-cat"><h4>${esc(c.cat)}</h4>${c.items.map(i => `<button class="stock-it ${i.soldOut ? "out" : ""}" data-so="${i.id}" ${menuSource === "config" ? "disabled" : ""}><span>${esc(i.name)}</span><b>${i.soldOut ? "Habis" : "Ada"}</b></button>`).join("")}</div>`).join("")}</div>
+    </details>
     <details class="hist" id="shHist"><summary>Sejarah shift</summary><div id="shList"><p class="muted">Memuatkan…</p></div></details>
     <details class="hist"><summary>Link &amp; QR untuk pelanggan</summary>
       <p style="font-size:14px">Link menu pelanggan: <span class="linkbox"><code id="lnk">${esc(base)}</code><button class="btn ghost" id="cp" style="padding:4px 10px">Salin</button></span></p>
@@ -182,6 +191,12 @@ function render() {
 }
 function bindDash() {
   $("#hist").ontoggle = () => histOpen = $("#hist").open;
+  $("#stock").ontoggle = () => stockOpen = $("#stock").open;
+  document.querySelectorAll("[data-so]").forEach(b => b.onclick = async () => {
+    const it = ITEM[b.dataset.so]; if (!it) return; b.disabled = true;
+    try { await setSoldOut(it.id, !it.soldOut); toast(it.soldOut ? `${it.name} ada semula.` : `${it.name} ditanda habis.`); }
+    catch (e) { toast("Tak berjaya kemaskini stok."); b.disabled = false; }
+  });
   $("#shHist").ontoggle = async () => { if ($("#shHist").open) { shiftHist = await listShifts(10).catch(() => []); paintShiftHist(); } };
   $("#tSound").onclick = () => { sound = !sound; chime(); render(); };
   $("#tAuto").onclick = () => { autoPrint = !autoPrint; ls.set("sips.autoprint", autoPrint); render(); };
@@ -290,7 +305,7 @@ function openPayment({ total, title, sub, onPaid, onBack }) {
 let pos = null;
 function openPOS() {
   if (!isOpen()) { toast("Buka shift dulu."); return; }
-  pos = pos || { cat: MENU[0].cat, cart: [], name: "", phone: "" };
+  pos = pos || { cat: MENU[0]?.cat || "", cart: [], name: "", phone: "" };
   drawPOS();
 }
 const posTotal = () => r2(pos.cart.reduce((s, l) => s + l.unit * l.qty, 0));
@@ -301,7 +316,7 @@ function drawPOS() {
     <div class="pos">
       <div class="pos-menu">
         <div class="chips">${MENU.map(c => `<button data-c="${esc(c.cat)}" aria-pressed="${pos.cat === c.cat}">${esc(c.cat)}</button>`).join("")}</div>
-        <div class="pos-grid">${items.map(it => `<button data-i="${it.id}"><span class="pn">${esc(it.name)}</span><span class="pp num">${rm(it.price)}</span></button>`).join("")}</div>
+        <div class="pos-grid">${items.map(it => `<button data-i="${it.id}" ${it.soldOut ? "disabled" : ""} class="${it.soldOut ? "so" : ""}"><span class="pn">${esc(it.name)}</span><span class="pp num">${it.soldOut ? "Habis" : rm(it.price)}</span></button>`).join("")}</div>
       </div>
       <div class="pos-cart">
         <h3>Troli <span class="muted">(${pos.cart.reduce((s, l) => s + l.qty, 0)} item)</span></h3>
@@ -325,7 +340,7 @@ function drawPOS() {
     keepPos();
     const total = posTotal();
     openPayment({ total, title: "Bayaran order manual", sub: pos.name || "Pelanggan walk-in", onBack: drawPOS, onPaid: async p => {
-      const o = await createPosOrder({ name: pos.name, phone: "", items: pos.cart.map(l => ({ name: l.name, opts: l.opts, note: l.note, qty: l.qty, unit: l.unit, food: l.food, gift: l.gift || null })), subtotal: total }, p, shift.shiftId);
+      const o = await createPosOrder({ name: pos.name, phone: "", items: pos.cart.map(l => ({ pid: l.itemId, cat: catOf(l.itemId), name: l.name, opts: l.opts, note: l.note, qty: l.qty, unit: l.unit, food: l.food, gift: l.gift || null })), subtotal: total }, p, shift.shiftId);
       pos = null; closeModal();
       toast(p.method === "cash" && p.change > 0 ? `Order #${pad3(o.no)} disimpan. Baki: ${rm(p.change)}` : `Order #${pad3(o.no)} disimpan.`);
       queueLabels(o, true);

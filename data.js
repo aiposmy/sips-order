@@ -1,6 +1,6 @@
 // Lapisan data: Firebase (live) atau localStorage (mod demo).
 // Keselamatan sebenar dikuatkuasakan oleh firestore.rules di server.
-import { FIREBASE_CONFIG, LOYALTY } from "./config.js";
+import { FIREBASE_CONFIG, LOYALTY, MENU as DEFAULT_MENU } from "./config.js";
 
 export const LIVE = !!(FIREBASE_CONFIG.apiKey && !FIREBASE_CONFIG.apiKey.startsWith("ISI"));
 export const today = () => { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); };
@@ -22,7 +22,7 @@ async function F() {
 }
 
 /* ================= MOD DEMO (satu browser, sync antara tab) ================= */
-const K = { orders: "sips.demo.orders", members: "sips.demo.members", accounts: "sips.demo.accounts", session: "sips.demo.session", guest: "sips.demo.uid", shift: "sips.demo.shift", shifts: "sips.demo.shifts" };
+const K = { orders: "sips.demo.orders", members: "sips.demo.members", accounts: "sips.demo.accounts", session: "sips.demo.session", guest: "sips.demo.uid", shift: "sips.demo.shift", shifts: "sips.demo.shifts", menu: "sips.demo.menu" };
 const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch (e) { return d; } };
 const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} demo.fire(); };
 const demo = { subs: new Set(), fire() { demo.subs.forEach(f => f()); } };
@@ -244,14 +244,14 @@ const DEMO_PIN = "1234";
 export async function staffWatch(cb) {
   if (!LIVE) {
     let ok = false; try { ok = sessionStorage.getItem("sips.demo.staff") === "1"; } catch (e) {}
-    cb(ok ? { email: "demo@sips" } : null); return;
+    cb(ok ? { email: "demo@sips", role: "admin" } : null); return;
   }
   const { auth, fs, A, D } = await F();
   auth.onAuthStateChanged(A, async u => {
     if (!u || u.isAnonymous) return cb(null);
     try {
       const s = await fs.getDoc(fs.doc(D, "staff", u.email));
-      if (s.exists()) cb({ email: u.email });
+      if (s.exists()) cb({ email: u.email, role: s.data().role || "staff" });
       else { await auth.signOut(A); cb(null, "Akaun ini bukan staff SIPS."); }
     } catch (e) { await auth.signOut(A); cb(null, "Akaun ini bukan staff SIPS."); }
   });
@@ -407,4 +407,110 @@ export async function createPosOrder(order, payment, shiftId) {
     return n;
   });
   return { ...base, id: ref.id, no, day, createdAt: now };
+}
+
+/* ======================= MENU (PRODUK, KATEGORI, PILIHAN) ======================= */
+// Firestore: categories/{id} {name, sort}, optionGroups/{id} {name, choices:[{n,p}], def, sort},
+// products/{id} {name, desc, price, cat, color, img, imgData, tags, optIds, food, active, soldOut, sort}
+// Kalau Firestore masih kosong, menu dari config.js digunakan.
+const byS = (a, b) => (a.sort ?? 0) - (b.sort ?? 0) || String(a.name).localeCompare(String(b.name));
+export function buildMenu(raw, { includeHidden = false } = {}) {
+  const groups = Object.fromEntries(raw.groups.map(g => [g.id, g]));
+  return [...raw.cats].sort(byS).map(c => ({
+    cat: c.name, catId: c.id,
+    items: raw.products.filter(p => p.cat === c.id && (includeHidden || p.active !== false)).sort(byS).map(p => ({
+      id: p.id, name: p.name, desc: p.desc || "", price: Number(p.price) || 0, color: p.color || "#e6d2ae",
+      img: p.imgData || p.img || "", tags: p.tags || [], food: !!p.food, soldOut: !!p.soldOut, active: p.active !== false,
+      opts: (p.optIds || []).map(id => groups[id]).filter(Boolean).map(g => ({ key: g.id, label: g.name, choices: g.choices || [], def: g.def || 0 })),
+    })),
+  })).filter(c => includeHidden || c.items.length);
+}
+// Tukar menu config.js kepada bentuk data Firestore
+export function defaultRaw() {
+  const cats = [], groups = {}, products = [];
+  DEFAULT_MENU.forEach((c, ci) => {
+    const cid = "cat" + (ci + 1);
+    cats.push({ id: cid, name: c.cat, sort: ci + 1 });
+    c.items.forEach((it, ii) => {
+      (it.opts || []).forEach((o, oi) => { if (!groups[o.key]) groups[o.key] = { id: o.key, name: o.label, choices: o.choices, def: o.def || 0, sort: Object.keys(groups).length + 1 }; });
+      products.push({ id: it.id, name: it.name, desc: it.desc || "", price: it.price, cat: cid, color: it.color || "", img: it.img || "", imgData: "",
+        tags: it.tags || [], optIds: (it.opts || []).map(o => o.key), food: !!it.food, active: true, soldOut: false, sort: ii + 1 });
+    });
+  });
+  return { cats, groups: Object.values(groups), products };
+}
+const demoMenu = () => load(K.menu, null);
+export async function watchMenu(cb) {
+  if (!LIVE) return demoSub(() => {
+    const m = demoMenu();
+    if (!m) return cb({ raw: defaultRaw(), source: "config" });
+    cb({ raw: { cats: Object.values(m.cats), groups: Object.values(m.groups), products: Object.values(m.products) }, source: "db" });
+  });
+  const { fs, D } = await F();
+  const st = { cats: null, groups: null, products: null };
+  const emit = () => {
+    if (!st.cats || !st.groups || !st.products) return;
+    if (!st.products.length && !st.cats.length) return cb({ raw: defaultRaw(), source: "config" });
+    cb({ raw: { ...st }, source: "db" });
+  };
+  const sub = (name, key) => fs.onSnapshot(fs.collection(D, name), s => { st[key] = s.docs.map(d => ({ id: d.id, ...d.data() })); emit(); },
+    () => { st[key] = st[key] || []; emit(); });
+  const u = [sub("categories", "cats"), sub("optionGroups", "groups"), sub("products", "products")];
+  return () => u.forEach(f => f());
+}
+const COL = { cats: "categories", groups: "optionGroups", products: "products" };
+function demoEnsure() { let m = demoMenu(); if (!m) { const r = defaultRaw(); m = { cats: {}, groups: {}, products: {}, costs: { products: {}, choices: {} } }; r.cats.forEach(x => m.cats[x.id] = x); r.groups.forEach(x => m.groups[x.id] = x); r.products.forEach(x => m.products[x.id] = x); } return m; }
+// Simpan (cipta/kemaskini) satu rekod menu. kind: "cats" | "groups" | "products"
+export async function saveMenuItem(kind, data) {
+  const id = data.id || (kind === "products" ? "p" : kind === "cats" ? "c" : "g") + newId();
+  const body = { ...data }; delete body.id;
+  if (!LIVE) { const m = demoEnsure(); m[kind][id] = { ...body, id }; store(K.menu, m); return id; }
+  const { fs, D } = await F(); await fs.setDoc(fs.doc(D, COL[kind], id), body); return id;
+}
+export async function deleteMenuItem(kind, id) {
+  if (!LIVE) { const m = demoEnsure(); delete m[kind][id]; store(K.menu, m); return; }
+  const { fs, D } = await F(); await fs.deleteDoc(fs.doc(D, COL[kind], id));
+}
+// Staff: tanda stok habis / ada semula
+export async function setSoldOut(pid, soldOut) {
+  if (!LIVE) { const m = demoEnsure(); if (m.products[pid]) m.products[pid].soldOut = soldOut; store(K.menu, m); return; }
+  const { fs, D } = await F(); await fs.updateDoc(fs.doc(D, "products", pid), { soldOut });
+}
+// Salin menu contoh dari config.js ke Firebase (sekali sahaja, bila mula guna page admin)
+export async function importDefaultMenu() {
+  const r = defaultRaw();
+  if (!LIVE) { const m = demoEnsure(); store(K.menu, m); return; }
+  const { fs, D } = await F();
+  const b = fs.writeBatch(D);
+  r.cats.forEach(x => { const { id, ...d } = x; b.set(fs.doc(D, "categories", id), d); });
+  r.groups.forEach(x => { const { id, ...d } = x; b.set(fs.doc(D, "optionGroups", id), d); });
+  r.products.forEach(x => { const { id, ...d } = x; b.set(fs.doc(D, "products", id), d); });
+  await b.commit();
+}
+// Kos (rahsia, admin sahaja): {products: {pid: kos}, choices: {"Large": kos tambahan}}
+export async function getCosts() {
+  if (!LIVE) return demoEnsure().costs || { products: {}, choices: {} };
+  const { fs, D } = await F();
+  const s = await fs.getDoc(fs.doc(D, "meta", "costs"));
+  return s.exists() ? { products: {}, choices: {}, ...s.data() } : { products: {}, choices: {} };
+}
+export async function saveCosts(costs) {
+  if (!LIVE) { const m = demoEnsure(); m.costs = costs; store(K.menu, m); return; }
+  const { fs, D } = await F(); await fs.setDoc(fs.doc(D, "meta", "costs"), costs);
+}
+
+/* ======================= LAPORAN (ADMIN) ======================= */
+export async function ordersInRange(from, to) {
+  if (!LIVE) return Object.values(load(K.orders, {})).filter(o => o.day >= from && o.day <= to);
+  const { fs, D } = await F();
+  const q = fs.query(fs.collection(D, "orders"), fs.where("day", ">=", from), fs.where("day", "<=", to));
+  const s = await fs.getDocs(q);
+  return s.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+export async function shiftsInRange(fromTs, toTs) {
+  if (!LIVE) return Object.values(load(K.shifts, {})).filter(s => s.openedAt >= fromTs && s.openedAt <= toTs).sort((a, b) => b.openedAt - a.openedAt);
+  const { fs, D } = await F();
+  const q = fs.query(fs.collection(D, "shifts"), fs.where("openedAt", ">=", fromTs), fs.where("openedAt", "<=", toTs));
+  const s = await fs.getDocs(q);
+  return s.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => b.openedAt - a.openedAt);
 }
