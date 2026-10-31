@@ -33,6 +33,26 @@ export const LOYALTY = {
 };
 
 // ================================================================
+//  KAUNTER: CARA BAYARAN, STICKER CAWAN & UCAPAN
+// ================================================================
+export const PAYMENTS = [
+  { id: "cash", label: "Tunai",          short: "CASH" },
+  { id: "qr",   label: "QRPay / DuitNow", short: "QR" },
+  { id: "card", label: "Kad Debit / Kredit", short: "KAD" },
+];
+
+// Saiz sticker (mm). Saiz biasa untuk cawan: 40x30, 50x30, 58x40.
+// food:false -> tak cetak sticker untuk makanan.
+export const LABEL = { width: 50, height: 30, food: true };
+
+// Ucapan pada cawan (customer & order manual)
+export const GIFT = {
+  maxMsg: 60, maxName: 18,
+  presets: ["Happy Birthday!", "Happy Anniversary", "Selamat Hari Raya", "Terima kasih sebab selalu ada",
+            "Semoga cepat sembuh", "Kau kuat, jangan give up!", "I love you", "Tahniah!"],
+};
+
+// ================================================================
 //  MENU (CONTOH) — tukar nama, harga & pilihan ikut menu sebenar
 //  food:true  -> masuk bahagian MAKANAN pada docket dapur
 //  img        -> gambar produk dalam folder img/ (pilihan; tanpa img guna ilustrasi)

@@ -232,3 +232,30 @@ body.cust main#view-menu::after {
   transform: rotate(-12deg);
 }
 html:root, body.cust { overflow-x: clip; }
+
+/* ---------- ucapan pada cawan ---------- */
+.giftcta { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; margin-top: 16px;
+  background: linear-gradient(120deg, #FFF3F6, #FFF9EF); border: 1.5px dashed #E7A9BC; border-radius: 18px; padding: 14px 16px; color: var(--ink);
+  transition: transform .15s ease, box-shadow .15s ease; }
+.giftcta:hover { transform: translateY(-1px); box-shadow: var(--shadow-sm); }
+.giftcta .gc-ico { font-size: 26px; line-height: 1; }
+.giftcta b { display: block; color: #9C3557; font-size: 15px; }
+.giftcta small { display: block; color: var(--grey); font-size: 13px; margin-top: 2px; }
+.giftcta .gc-add { margin-left: auto; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: #F3C6D4; color: #9C3557; font-weight: 800; flex: none; }
+.giftbox { margin-top: 16px; background: linear-gradient(160deg, #FFF3F6 0%, #FFF9EF 70%); border: 1.5px solid #F0C7D4; border-radius: 18px; padding: 14px 16px; }
+.gb-head { display: flex; justify-content: space-between; align-items: center; color: #9C3557; }
+.gb-head .linkish { border: 0; background: none; color: var(--grey); font-weight: 700; font-size: 13px; }
+.gb-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 2px; }
+.gb-chips button { border: 1px solid #F0C7D4; background: #fff; color: #9C3557; border-radius: 999px; padding: 7px 12px; font-size: 13px; font-weight: 700; }
+.gb-chips button[aria-pressed="true"] { background: #9C3557; color: #fff; border-color: #9C3557; }
+.gb-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+body.cust textarea { width: 100%; font: inherit; color: var(--ink); background: #fff; border: 1px solid #E6DAC4; border-radius: 12px; padding: 10px 12px; resize: none; }
+.field span small { font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--grey); }
+.gb-prev { position: relative; margin: 14px auto 2px; width: min(100%, 260px); aspect-ratio: 5 / 3; background: #fff; border-radius: 10px;
+  box-shadow: 0 6px 18px -8px rgba(18,63,43,.35); display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 10px 14px; gap: 4px; }
+.gp-tag { position: absolute; top: -9px; left: 10px; background: var(--forest); color: #fff; font-size: 10px; font-weight: 700; border-radius: 999px; padding: 2px 8px; letter-spacing: .04em; }
+.gp-to { font-weight: 800; font-size: 13px; color: var(--ink); }
+.gp-msg { font-family: var(--f-script); font-size: 20px; line-height: 1.1; color: var(--ink); overflow-wrap: anywhere; }
+.gp-from { font-weight: 700; font-size: 12px; color: var(--grey); }
+.gline { display: block; color: #9C3557; font-weight: 600; margin-top: 2px; }
+.closed-note { margin-top: 14px; background: #FFF1E6; border: 1px solid #F3C9A6; color: #7A3E12; border-radius: 16px; padding: 12px 16px; font-size: 14px; }

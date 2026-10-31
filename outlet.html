@@ -10,6 +10,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800;900&family=Figtree:wght@400;500;600;700&family=Dancing+Script:wght@600&family=Courier+Prime:wght@400;700&display=swap">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="outlet.css">
 </head>
 <body class="outlet">
 <header class="band">
@@ -37,29 +38,40 @@
 <div id="printArea" aria-hidden="true"></div>
 
 <script type="module">
-import { OUTLET } from "./config.js";
-import { LIVE, today, pointsFor, staffWatch, staffLogin, staffLogout, watchOrders, updateOrder, deleteOrder, completeOrder, cancelOrder } from "./data.js";
+import { OUTLET, MENU, PAYMENTS, LABEL, GIFT } from "./config.js";
+import { LIVE, today, pointsFor, staffWatch, staffLogin, staffLogout, watchOrders, updateOrder, deleteOrder, completeOrder, cancelOrder,
+  watchShift, openShift, closeShift, shiftSummary, listShifts, createPosOrder } from "./data.js";
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const rm = n => "RM" + (Math.round(n * 100) / 100).toFixed(2);
+const r2 = n => Math.round(n * 100) / 100;
 const tm = t => new Date(t).toLocaleTimeString("ms-MY", { hour: "2-digit", minute: "2-digit", hour12: false });
+const dtm = t => new Date(t).toLocaleString("ms-MY", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false });
 const pad3 = n => String(n).padStart(3, "0");
+const num = v => { const n = parseFloat(String(v).replace(",", ".")); return isFinite(n) ? r2(n) : NaN; };
 const ls = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} } };
+const PAY = Object.fromEntries(PAYMENTS.map(p => [p.id, p]));
+const ITEM = {}; MENU.forEach(c => c.items.forEach(i => ITEM[i.id] = i));
 
 if (!LIVE) { $("#banner").hidden = false; $("#bannerText").innerHTML = "<span><b>Mod demo.</b> Kata laluan: <b>1234</b>. Order dari index.html dalam browser yang sama akan muncul di sini.</span>"; }
 
-function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 2600); }
+// Saiz kertas sticker untuk print
+const ps = document.createElement("style");
+ps.textContent = `@media print{@page{size:${LABEL.width}mm ${LABEL.height}mm;margin:0}}:root{--lw:${LABEL.width}mm;--lh:${LABEL.height}mm}`;
+document.head.appendChild(ps);
+
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 2800); }
 function closeModal() { $("#modal").innerHTML = ""; document.body.style.overflow = ""; }
-function openModal(html, onMount) {
-  $("#modal").innerHTML = `<div class="scrim" id="scrim"><div class="sheet" role="dialog" aria-modal="true">${html}</div></div>`;
+function openModal(html, { wide = false, onClose = closeModal } = {}) {
+  $("#modal").innerHTML = `<div class="scrim" id="scrim"><div class="sheet ${wide ? "wide" : ""}" role="dialog" aria-modal="true">${html}</div></div>`;
   document.body.style.overflow = "hidden";
-  $("#scrim").addEventListener("click", e => { if (e.target.id === "scrim") nextDocket(); });
-  onMount && onMount();
+  $("#scrim").addEventListener("click", e => { if (e.target.id === "scrim") onClose(); });
+  return $("#modal .sheet");
 }
 
 /* ---------- LOGIN ---------- */
-let started = false;
+let started = false, staffEmail = "";
 $("#loginForm").addEventListener("submit", async e => {
   e.preventDefault();
   $("#lErr").hidden = true; $("#lBtn").disabled = true; $("#lBtn").textContent = "Sedang log masuk…";
@@ -68,8 +80,10 @@ $("#loginForm").addEventListener("submit", async e => {
   $("#lBtn").disabled = false; $("#lBtn").textContent = "Log masuk";
 });
 
-/* ---------- DASHBOARD ---------- */
+/* ---------- STATE ---------- */
 let orders = [], seen = null, sound = false, autoPrint = ls.get("sips.autoprint", false), audioCtx = null, histOpen = false, confirmClear = false, day = today(), unsub = null;
+let shift = null, shiftOpenForm = { name: ls.get("sips.staffname", ""), cash: "" }, shiftHist = null;
+const isOpen = () => !!(shift && shift.open);
 
 function chime() {
   if (!sound) return;
@@ -88,57 +102,87 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
 
 async function subscribe() {
   unsub && unsub(); seen = null;
-  unsub = await watchOrders(day, (list, err) => {
+  unsub = await watchOrders(day, (list) => {
     if (!list) { toast("Sambungan ke server terputus. Muat semula page."); return; }
     const fresh = seen ? list.filter(o => !seen.has(o.id) && o.status === "new") : [];
     seen = new Set(list.map(o => o.id)); orders = list;
     if (fresh.length) {
       chime(); toast(`Order baru #${pad3(fresh[0].no)} masuk`);
-      document.title = `(${orders.filter(o => o.status === "new").length}) SIPS Outlet`;
-      fresh.sort((a, b) => a.createdAt - b.createdAt).forEach(o => autoPrint ? queueDocket(o, true) : null);
+      if (autoPrint && isOpen()) fresh.sort((a, b) => a.createdAt - b.createdAt).forEach(o => queueLabels(o, true));
     }
-    render();
+    if (!$("#modal").innerHTML) render(); else render.pending = true;
   });
 }
 function start() {
   keepAwake(); subscribe();
+  watchShift(s => { shift = s; if (!$("#modal").innerHTML) render(); else render.pending = true; });
   setInterval(() => { if (today() !== day) { day = today(); subscribe(); } else if (!$("#modal").innerHTML) render(); }, 30000);
 }
 function ago(t) { const m = Math.floor((Date.now() - t) / 60000); return m < 1 ? "baru tadi" : m < 60 ? m + " min lalu" : tm(t); }
+const afterModal = () => { closeModal(); if (queue.length) nextLabels(); else render(); };
 
+/* ================= DASHBOARD ================= */
+function shiftBar() {
+  if (!shift) return `<div class="shift-card"><p class="muted">Memuatkan status shift…</p></div>`;
+  if (!isOpen()) return `
+    <section class="shift-card closed">
+      <div class="sc-head"><span class="lock" aria-hidden="true">🔒</span><div><h2>Shift belum dibuka</h2>
+      <p>Order pelanggan masih boleh dilihat, tapi staff <b>tak boleh terima, buat atau serah order</b> sehingga shift dibuka. Pelanggan juga tak boleh hantar order dari app.</p></div></div>
+      <div class="sc-form">
+        <label class="field"><span>Nama staff bertugas</span><input type="text" id="sName" maxlength="30" value="${esc(shiftOpenForm.name)}" placeholder="Cth: Aina"></label>
+        <label class="field"><span>Duit permulaan dalam laci (RM)</span><input type="text" inputmode="decimal" id="sCash" value="${esc(shiftOpenForm.cash)}" placeholder="Cth: 100.00"></label>
+        <div class="quick">${[50, 100, 150, 200].map(v => `<button data-q="${v}">RM${v}</button>`).join("")}</div>
+        <div class="err" id="sErr" hidden></div>
+        <button class="btn big" id="sOpen">Buka shift</button>
+      </div>
+    </section>`;
+  return `
+    <section class="shift-card open">
+      <div class="sc-info"><span class="dot-live"></span><div><b>Shift dibuka ${tm(shift.openedAt)}</b> oleh ${esc(shift.staffName || "-")}<br><span class="muted">Duit permulaan ${rm(shift.openingCash || 0)}</span></div></div>
+      <div class="sc-acts"><button class="btn big" id="posBtn">＋ Order manual</button><button class="btn ghost" id="endBtn">Tutup shift</button></div>
+    </section>`;
+}
 function render() {
+  render.pending = false;
   const by = s => orders.filter(o => o.status === s).sort((a, b) => a.createdAt - b.createdAt);
   const nNew = by("new").length;
   document.title = nNew ? `(${nNew}) SIPS Outlet` : "SIPS Outlet";
-  const sales = orders.filter(o => o.status !== "cancel").reduce((s, o) => s + o.total, 0);
+  const paid = orders.filter(o => o.paid && o.status !== "cancel");
+  const sales = paid.reduce((s, o) => s + o.total, 0);
   const lane = (s, title, emptyMsg) => { const L = by(s); return `<section class="lane"><h2 style="color:var(--${s})">${title}<span class="c num">${L.length}</span></h2>${L.length ? L.map(ticket).join("") : `<div class="empty">${emptyMsg}</div>`}</section>`; };
   const done = orders.filter(o => o.status === "done" || o.status === "cancel").sort((a, b) => b.createdAt - a.createdAt);
   const base = location.href.replace(/outlet\.html.*$/, "");
   $("#view-outlet").innerHTML = `
+    ${shiftBar()}
     <div class="toolbar"><h1>${esc(OUTLET.branch)}</h1>
       <button class="tgl" id="tSound" aria-pressed="${sound}"><i></i>Bunyi alert ${sound ? "ON" : "OFF"}</button>
-      <button class="tgl" id="tAuto" aria-pressed="${autoPrint}"><i></i>Auto print docket ${autoPrint ? "ON" : "OFF"}</button></div>
+      <button class="tgl" id="tAuto" aria-pressed="${autoPrint}"><i></i>Auto print sticker ${autoPrint ? "ON" : "OFF"}</button></div>
     <div class="stats">
       <div class="stat"><b class="num" style="color:var(--new)">${nNew}</b><span>Order baru</span></div>
       <div class="stat"><b class="num">${by("prep").length}</b><span>Sedang disediakan</span></div>
       <div class="stat"><b class="num">${orders.filter(o => o.status !== "cancel").length}</b><span>Order hari ini</span></div>
-      <div class="stat"><b class="num">${rm(sales)}</b><span>Jualan hari ini</span></div></div>
-    <div class="lanes">
+      <div class="stat"><b class="num">${rm(sales)}</b><span>Bayaran diterima hari ini</span></div></div>
+    <div class="lanes ${isOpen() ? "" : "locked"}">
       ${lane("new", "Baru", "Tiada order baru. Order pelanggan akan muncul di sini dengan bunyi alert.")}
-      ${lane("prep", "Disediakan", "Tekan “Terima & print” pada order baru untuk mula sediakan.")}
+      ${lane("prep", "Disediakan", "Tekan “Terima & print” pada order baru, atau buat order manual.")}
       ${lane("ready", "Siap diambil", "Order yang dah siap akan tunggu di sini.")}
     </div>
     <details class="hist" id="hist" ${histOpen ? "open" : ""}><summary>Selesai &amp; batal hari ini (${done.length})</summary>
-      <div class="htable">${done.length ? `<table><thead><tr><th>No</th><th>Masa</th><th>Nama</th><th>Item</th><th>Jumlah</th><th>Point</th><th>Status</th></tr></thead><tbody>
-      ${done.map(o => `<tr><td class="num">#${pad3(o.no)}</td><td class="num">${tm(o.createdAt)}</td><td>${esc(o.name)}</td><td>${o.items.reduce((s, i) => s + i.qty, 0)}</td><td class="num">${rm(o.total)}${o.discount ? ` <small>(-${rm(o.discount)})</small>` : ""}</td><td class="num">${o.pointsAwarded ? "+" + o.points : o.member ? "-" : "Tetamu"}</td><td>${o.status === "done" ? "Selesai" : "Batal"}</td></tr>`).join("")}
+      <div class="htable">${done.length ? `<table><thead><tr><th>No</th><th>Masa</th><th>Nama</th><th>Sumber</th><th>Item</th><th>Jumlah</th><th>Bayaran</th><th>Point</th><th>Status</th></tr></thead><tbody>
+      ${done.map(o => `<tr><td class="num">#${pad3(o.no)}</td><td class="num">${tm(o.createdAt)}</td><td>${esc(o.name || "-")}</td><td>${o.source === "pos" ? "Kaunter" : "App"}</td><td>${o.items.reduce((s, i) => s + i.qty, 0)}</td><td class="num">${rm(o.total)}${o.discount ? ` <small>(-${rm(o.discount)})</small>` : ""}</td><td>${o.paid ? esc(PAY[o.payment?.method]?.short || "-") : "-"}</td><td class="num">${o.pointsAwarded ? "+" + o.points : o.member ? "-" : ""}</td><td>${o.status === "done" ? "Selesai" : "Batal"}</td></tr>`).join("")}
       </tbody></table>` : `<p style="color:var(--muted)">Belum ada.</p>`}</div>
       <div class="danger">${confirmClear ? `<span>Padam semua order hari ini? Tak boleh undo.</span><button class="btn" style="background:var(--new);color:#fff" id="clrYes">Ya, padam</button><button class="btn ghost" id="clrNo">Batal</button>` : `<button class="btn ghost" id="clr">Kosongkan order hari ini</button>`}</div>
     </details>
+    <details class="hist" id="shHist"><summary>Sejarah shift</summary><div id="shList"><p class="muted">Memuatkan…</p></div></details>
     <details class="hist"><summary>Link &amp; QR untuk pelanggan</summary>
       <p style="font-size:14px">Link menu pelanggan: <span class="linkbox"><code id="lnk">${esc(base)}</code><button class="btn ghost" id="cp" style="padding:4px 10px">Salin</button></span></p>
       <p style="font-size:14px">Jadikan link ini QR untuk ditampal di kaunter, banner dan bungkusan.</p>
     </details>`;
+  bindDash();
+}
+function bindDash() {
   $("#hist").ontoggle = () => histOpen = $("#hist").open;
+  $("#shHist").ontoggle = async () => { if ($("#shHist").open) { shiftHist = await listShifts(10).catch(() => []); paintShiftHist(); } };
   $("#tSound").onclick = () => { sound = !sound; chime(); render(); };
   $("#tAuto").onclick = () => { autoPrint = !autoPrint; ls.set("sips.autoprint", autoPrint); render(); };
   const c = $("#clr"); if (c) c.onclick = () => { confirmClear = true; histOpen = true; render(); };
@@ -146,84 +190,318 @@ function render() {
   const y = $("#clrYes"); if (y) y.onclick = async () => { confirmClear = false; for (const o of [...orders]) await deleteOrder(o.id).catch(() => {}); toast("Order hari ini dikosongkan"); };
   $("#cp").onclick = async () => { try { await navigator.clipboard.writeText($("#lnk").textContent); toast("Link disalin"); } catch (e) { toast("Tekan lama pada link untuk salin."); } };
   document.querySelectorAll("[data-act]").forEach(b => b.onclick = () => act(b.dataset.id, b.dataset.act));
+  // shift
+  const so = $("#sOpen");
+  if (so) {
+    const keep = () => { shiftOpenForm.name = $("#sName").value.trim(); shiftOpenForm.cash = $("#sCash").value.trim(); };
+    document.querySelectorAll("[data-q]").forEach(b => b.onclick = () => { keep(); shiftOpenForm.cash = b.dataset.q + ".00"; $("#sCash").value = shiftOpenForm.cash; });
+    so.onclick = async () => {
+      keep(); const cash = num(shiftOpenForm.cash), e = $("#sErr");
+      if (!shiftOpenForm.name) { e.textContent = "Sila isi nama staff bertugas."; e.hidden = false; return; }
+      if (isNaN(cash) || cash < 0) { e.textContent = "Sila isi jumlah duit permulaan (boleh 0)."; e.hidden = false; return; }
+      so.disabled = true; so.textContent = "Membuka shift…";
+      try { await openShift({ staffName: shiftOpenForm.name, openingCash: cash, email: staffEmail }); ls.set("sips.staffname", shiftOpenForm.name); shiftOpenForm.cash = ""; toast("Shift dibuka. Selamat bertugas!"); }
+      catch (err) { e.textContent = err.message || "Tak berjaya buka shift."; e.hidden = false; so.disabled = false; so.textContent = "Buka shift"; }
+    };
+  }
+  const pb = $("#posBtn"); if (pb) pb.onclick = openPOS;
+  const eb = $("#endBtn"); if (eb) eb.onclick = openEndShift;
 }
+function paintShiftHist() {
+  const el = $("#shList"); if (!el) return;
+  const L = shiftHist || [];
+  el.innerHTML = L.length ? `<div class="htable"><table><thead><tr><th>Dibuka</th><th>Staff</th><th>Ditutup</th><th>Order</th><th>CASH</th><th>QR</th><th>KAD</th><th>Jualan</th><th>Tunai dijangka</th><th>Dikira</th><th>Beza</th></tr></thead><tbody>
+    ${L.map(s => `<tr><td class="num">${dtm(s.openedAt)}</td><td>${esc(s.staffName || "")}</td><td class="num">${s.status === "closed" ? dtm(s.closedAt) : "<b>Masih dibuka</b>"}</td><td class="num">${s.orderCount ?? "-"}</td><td class="num">${s.totals ? rm(s.totals.cash) : "-"}</td><td class="num">${s.totals ? rm(s.totals.qr) : "-"}</td><td class="num">${s.totals ? rm(s.totals.card) : "-"}</td><td class="num">${s.sales != null ? rm(s.sales) : "-"}</td><td class="num">${s.expectedCash != null ? rm(s.expectedCash) : "-"}</td><td class="num">${s.countedCash != null ? rm(s.countedCash) : "-"}</td><td class="num ${s.variance < 0 ? "neg" : s.variance > 0 ? "pos" : ""}">${s.variance != null ? (s.variance > 0 ? "+" : "") + rm(s.variance) : "-"}</td></tr>`).join("")}
+    </tbody></table></div>` : `<p class="muted">Belum ada shift.</p>`;
+}
+
 function ticket(o) {
+  const L = !isOpen() ? "disabled" : "";
+  const payBtn = o.paid ? `<button class="go" data-act="done" data-id="${o.id}" ${L}>Dah diambil</button>` : `<button class="go" data-act="pay" data-id="${o.id}" ${L}>Terima bayaran</button>`;
   const btns = {
-    new: `<button class="x" data-act="cancel" data-id="${o.id}">Batal</button><button data-act="docket" data-id="${o.id}">Docket</button><button class="go" data-act="accept" data-id="${o.id}">Terima &amp; print</button>`,
-    prep: `<button data-act="docket" data-id="${o.id}">Print semula</button><button class="go" data-act="ready" data-id="${o.id}">Siap</button>`,
-    ready: `<button data-act="back" data-id="${o.id}">Undur</button><button class="go" data-act="done" data-id="${o.id}">Dah diambil</button>`
+    new: `<button class="x" data-act="cancel" data-id="${o.id}" ${L}>Batal</button><button data-act="labels" data-id="${o.id}">Sticker</button><button class="go" data-act="accept" data-id="${o.id}" ${L}>Terima &amp; print</button>`,
+    prep: `<button data-act="labels" data-id="${o.id}">Print semula</button><button class="go" data-act="ready" data-id="${o.id}" ${L}>Siap</button>`,
+    ready: `<button data-act="back" data-id="${o.id}" ${L}>Undur</button>${payBtn}`
   }[o.status] || "";
+  const gifts = o.items.filter(i => i.gift && i.gift.msg).length;
   return `<article class="ticket s-${o.status}">
-    <div class="hd"><span class="no num">#${pad3(o.no)}</span><span class="pill ${o.type}">Takeaway</span>${o.member ? `<span class="pill mem">★ Ahli</span>` : ""}${o.printed ? `<span class="printed">✓ print ${o.printed}×</span>` : ""}<span class="time num">${tm(o.createdAt)} · ${ago(o.createdAt)}</span></div>
+    <div class="hd"><span class="no num">#${pad3(o.no)}</span><span class="pill ${o.source === "pos" ? "pos" : o.type}">${o.source === "pos" ? "Kaunter" : "App · Takeaway"}</span>${o.member ? `<span class="pill mem">★ Ahli</span>` : ""}${o.paid ? `<span class="pill paid">✓ ${esc(PAY[o.payment?.method]?.short || "Dibayar")}</span>` : `<span class="pill unpaid">Belum bayar</span>`}${o.printed ? `<span class="printed">✓ print ${o.printed}×</span>` : ""}<span class="time num">${tm(o.createdAt)} · ${ago(o.createdAt)}</span></div>
     ${o.name || o.phone ? `<div class="who" style="font-weight:700;color:var(--fg)">${esc(o.name)}${o.phone ? " · " + esc(o.phone) : ""}</div>` : ""}
-    <ul>${o.items.map(i => `<li><b class="num">${i.qty}×</b><span>${esc(i.name)}</span>${i.opts.length || i.note ? `<small>${esc(i.opts.join(" · "))}${i.note ? ` · <b style="color:var(--new)">${esc(i.note)}</b>` : ""}</small>` : ""}</li>`).join("")}</ul>
+    <ul>${o.items.map(i => `<li><b class="num">${i.qty}×</b><span>${esc(i.name)}</span>${i.opts.length || i.note ? `<small>${esc(i.opts.join(" · "))}${i.note ? ` · <b style="color:var(--new)">${esc(i.note)}</b>` : ""}</small>` : ""}${i.gift?.msg ? `<small class="giftline">♥ ${i.gift.to ? "Untuk " + esc(i.gift.to) + ": " : ""}“${esc(i.gift.msg)}”${i.gift.from ? " — " + esc(i.gift.from) : ""}</small>` : ""}</li>`).join("")}</ul>
+    ${gifts ? `<div class="giftnote">♥ ${gifts} cawan ada ucapan. Sticker ucapan dicetak sekali.</div>` : ""}
     ${o.discount ? `<div class="vline"><span>🎟 ${esc(o.voucherTitle || "Voucher")}</span><span class="num">Subtotal ${rm(o.subtotal)} · -${rm(o.discount)}</span></div>` : ""}
     <div class="ft"><span class="tot num">${rm(o.total)}${o.member ? `<small class="ptsnote">+${pointsFor(o.total)} pt bila diambil</small>` : ""}</span>${btns}</div></article>`;
 }
 async function act(id, a) {
   const o = orders.find(x => x.id === id); if (!o) return;
+  if (a === "labels") return queueLabels(o, false);
+  if (!isOpen()) { toast("Buka shift dulu untuk urus order."); return; }
   try {
-    if (a === "accept") { await updateOrder(id, { status: "prep", prepAt: Date.now() }); queueDocket(o, true); }
-    else if (a === "docket") queueDocket(o, false);
+    if (a === "accept") { await updateOrder(id, { status: "prep", prepAt: Date.now() }); queueLabels(o, true); }
     else if (a === "ready") await updateOrder(id, { status: "ready", readyAt: Date.now() });
     else if (a === "back") await updateOrder(id, { status: "prep" });
-    else if (a === "done") { const g = await completeOrder(o); if (g) toast(`+${g} point diberi kepada ${o.name}`); }
+    else if (a === "pay") openPayment({ total: o.total, title: `Bayaran order #${pad3(o.no)}`, sub: o.name, onPaid: async p => { const g = await completeOrder(o, p, shift.shiftId); afterModal(); const ch = p.method === "cash" && p.change > 0 ? ` Baki: ${rm(p.change)}.` : ""; toast(g ? `Selesai.${ch} +${g} point untuk ${o.name}` : `Order #${pad3(o.no)} selesai.${ch}`); } });
+    else if (a === "done") { const g = await completeOrder(o, null, shift.shiftId); if (g) toast(`+${g} point diberi kepada ${o.name}`); }
     else if (a === "cancel") { await cancelOrder(o); if (o.voucherId) toast("Order dibatal. Voucher dipulangkan kepada ahli."); }
-  } catch (e) { toast("Tak berjaya kemaskini. Cuba lagi."); }
+  } catch (e) { console.error(e); toast("Tak berjaya kemaskini. Cuba lagi."); }
 }
 
-/* ---------- DOCKET DAPUR 80mm ---------- */
-const W = 42;
-const padLR = (l, r) => { l = String(l); r = String(r); return l + " ".repeat(Math.max(1, W - l.length - r.length)) + r; };
-const center = s => " ".repeat(Math.max(0, Math.floor((W - s.length) / 2))) + s;
-const wrapTxt = (s, ind) => { const out = []; let line = ""; s.split(" ").forEach(w => { if ((line + " " + w).trim().length > W - ind) { out.push(line); line = w; } else line = (line + " " + w).trim(); }); if (line) out.push(line); return out.map(x => " ".repeat(ind) + x); };
-function docketText(o) {
-  const L = [], hr = "-".repeat(W);
-  L.push(center(OUTLET.name.toUpperCase() + " - DOCKET DAPUR"), hr);
-  L.push(padLR("ORDER #" + pad3(o.no), "TAKEAWAY"));
-  L.push(padLR(new Date(o.createdAt).toLocaleDateString("ms-MY"), tm(o.createdAt)));
-  if (o.name) L.push("Nama: " + o.name + (o.phone ? "  " + o.phone : ""));
-  L.push(hr);
-  const sec = (t, arr) => { if (!arr.length) return; L.push("[" + t + "]"); arr.forEach(i => { wrapTxt(i.qty + "x " + i.name.toUpperCase(), 0).forEach(x => L.push(x)); if (i.opts.length) wrapTxt(i.opts.join(", "), 4).forEach(x => L.push(x)); if (i.note) wrapTxt("** " + i.note, 4).forEach(x => L.push(x)); }); L.push(""); };
-  sec("MINUMAN", o.items.filter(i => !i.food)); sec("MAKANAN", o.items.filter(i => i.food));
-  L.push(hr, padLR("Jumlah item: " + o.items.reduce((s, i) => s + i.qty, 0), "Cetak " + tm(Date.now())));
-  return L.join("\n");
+/* ================= BAYARAN ================= */
+function openPayment({ total, title, sub, onPaid, onBack }) {
+  let method = "cash", tendered = "", ref = "", err = "", busy = false;
+  const draw = () => {
+    const t = num(tendered), change = method === "cash" && !isNaN(t) ? r2(t - total) : 0;
+    const sh = openModal(`
+      <h2>${esc(title)}</h2>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}
+      <div class="pay-total"><span>Jumlah perlu dibayar</span><b class="num">${rm(total)}</b></div>
+      <div class="opt"><label class="t">Cara bayaran</label><div class="paygrid">
+        ${PAYMENTS.map(p => `<button data-m="${p.id}" aria-pressed="${method === p.id}"><span class="pi">${p.id === "cash" ? "💵" : p.id === "qr" ? "▦" : "💳"}</span>${esc(p.label)}</button>`).join("")}</div></div>
+      ${method === "cash" ? `
+        <label class="field"><span>Tunai diterima (RM)</span><input type="text" inputmode="decimal" id="pT" value="${esc(tendered)}" placeholder="${total.toFixed(2)}"></label>
+        <div class="quick"><button data-t="${total.toFixed(2)}">Tepat</button>${[5, 10, 20, 50, 100].filter(v => v > total).slice(0, 4).map(v => `<button data-t="${v}">RM${v}</button>`).join("")}</div>
+        <div class="change ${change < 0 ? "short" : ""}"><span>${change < 0 ? "Tak cukup" : "Baki untuk pelanggan"}</span><b class="num">${tendered === "" ? "-" : rm(Math.abs(change))}</b></div>`
+      : `<label class="field"><span>No. rujukan / 4 digit akhir (pilihan)</span><input type="text" id="pR" maxlength="30" value="${esc(ref)}"></label>
+         <div class="hint">${method === "qr" ? "Pastikan notifikasi bayaran QR dah masuk sebelum tekan Sahkan." : "Pastikan terminal kad tunjuk bayaran berjaya sebelum tekan Sahkan."}</div>`}
+      ${err ? `<div class="err">${esc(err)}</div>` : ""}
+      <div class="sheet-foot"><button class="btn ghost" id="pBack">${onBack ? "Kembali" : "Batal"}</button><button class="btn wide" id="pOk" ${busy ? "disabled" : ""}><span>${busy ? "Menyimpan…" : "Sahkan bayaran"}</span><span class="num">${rm(total)}</span></button></div>`,
+      { onClose: () => onBack ? onBack() : afterModal() });
+    const keep = () => { const a = $("#pT"), b = $("#pR"); if (a) tendered = a.value.trim(); if (b) ref = b.value.trim(); };
+    sh.querySelectorAll("[data-m]").forEach(b => b.onclick = () => { keep(); method = b.dataset.m; err = ""; draw(); });
+    sh.querySelectorAll("[data-t]").forEach(b => b.onclick = () => { keep(); tendered = b.dataset.t; err = ""; draw(); });
+    const pt = $("#pT"); if (pt) { pt.oninput = () => { tendered = pt.value.trim(); const t2 = num(tendered), ch = r2(t2 - total); const box = sh.querySelector(".change"); box.classList.toggle("short", ch < 0); box.querySelector("span").textContent = ch < 0 ? "Tak cukup" : "Baki untuk pelanggan"; box.querySelector("b").textContent = isNaN(t2) ? "-" : rm(Math.abs(ch)); }; pt.focus(); }
+    $("#pBack").onclick = () => onBack ? onBack() : afterModal();
+    $("#pOk").onclick = async () => {
+      keep();
+      let p;
+      if (method === "cash") {
+        const t2 = tendered === "" ? total : num(tendered);
+        if (isNaN(t2) || t2 < total) { err = "Tunai diterima kurang daripada jumlah."; draw(); return; }
+        p = { method, amount: total, tendered: t2, change: r2(t2 - total), ref: "" };
+      } else p = { method, amount: total, tendered: total, change: 0, ref };
+      busy = true; draw();
+      try { await onPaid(p); }
+      catch (e) { console.error(e); busy = false; err = e.message === "SHIFT_CLOSED" ? "Shift dah ditutup. Buka shift dulu." : "Tak berjaya simpan bayaran. Cuba lagi."; draw(); }
+    };
+  };
+  draw();
 }
-function docketHTML(o) { return `<div class="x2">#${pad3(o.no)}  T/AWAY</div>${esc(docketText(o))}`; }
 
+/* ================= ORDER MANUAL (KAUNTER) ================= */
+let pos = null;
+function openPOS() {
+  if (!isOpen()) { toast("Buka shift dulu."); return; }
+  pos = pos || { cat: MENU[0].cat, cart: [], name: "", phone: "" };
+  drawPOS();
+}
+const posTotal = () => r2(pos.cart.reduce((s, l) => s + l.unit * l.qty, 0));
+function drawPOS() {
+  const items = MENU.find(c => c.cat === pos.cat)?.items || [];
+  const sh = openModal(`
+    <div class="pos-head"><h2>Order manual</h2><button class="btn ghost sm" id="posX">Tutup</button></div>
+    <div class="pos">
+      <div class="pos-menu">
+        <div class="chips">${MENU.map(c => `<button data-c="${esc(c.cat)}" aria-pressed="${pos.cat === c.cat}">${esc(c.cat)}</button>`).join("")}</div>
+        <div class="pos-grid">${items.map(it => `<button data-i="${it.id}"><span class="pn">${esc(it.name)}</span><span class="pp num">${rm(it.price)}</span></button>`).join("")}</div>
+      </div>
+      <div class="pos-cart">
+        <h3>Troli <span class="muted">(${pos.cart.reduce((s, l) => s + l.qty, 0)} item)</span></h3>
+        ${pos.cart.length ? pos.cart.map((l, i) => `<div class="pl"><div><b>${esc(l.name)}</b><small>${esc([...l.opts, l.note && "Nota: " + l.note].filter(Boolean).join(" · "))}</small>${l.gift ? `<small class="giftline">♥ ${l.gift.to ? "Untuk " + esc(l.gift.to) + ": " : ""}“${esc(l.gift.msg)}”</small>` : ""}</div>
+          <div class="pl-r"><span class="num">${rm(l.unit * l.qty)}</span><span class="qty"><button data-m="${i}">−</button><span class="num">${l.qty}</span><button data-p="${i}">+</button></span></div></div>`).join("") : `<p class="muted">Tekan menu di sebelah untuk tambah item.</p>`}
+        <label class="field"><span>Nama pelanggan (pilihan)</span><input type="text" id="posName" maxlength="30" value="${esc(pos.name)}" placeholder="Untuk panggilan & sticker"></label>
+        <div class="sum"><span>Jumlah</span><span class="num">${rm(posTotal())}</span></div>
+        <button class="btn wide big" id="posPay" ${pos.cart.length ? "" : "disabled"}><span>Terima bayaran</span><span class="num">${rm(posTotal())}</span></button>
+        ${pos.cart.length ? `<button class="linkish" id="posClear">Kosongkan troli</button>` : ""}
+      </div>
+    </div>`, { wide: true, onClose: keepAndClose });
+  function keepPos() { const n = $("#posName"); if (n) pos.name = n.value.trim(); }
+  function keepAndClose() { keepPos(); afterModal(); }
+  $("#posX").onclick = keepAndClose;
+  sh.querySelectorAll("[data-c]").forEach(b => b.onclick = () => { keepPos(); pos.cat = b.dataset.c; drawPOS(); });
+  sh.querySelectorAll("[data-i]").forEach(b => b.onclick = () => { keepPos(); openItemPOS(b.dataset.i); });
+  sh.querySelectorAll("[data-m]").forEach(b => b.onclick = () => { keepPos(); const l = pos.cart[+b.dataset.m]; l.qty--; if (l.qty < 1) pos.cart.splice(+b.dataset.m, 1); drawPOS(); });
+  sh.querySelectorAll("[data-p]").forEach(b => b.onclick = () => { keepPos(); pos.cart[+b.dataset.p].qty++; drawPOS(); });
+  const pc = $("#posClear"); if (pc) pc.onclick = () => { pos.cart = []; drawPOS(); };
+  $("#posPay").onclick = () => {
+    keepPos();
+    const total = posTotal();
+    openPayment({ total, title: "Bayaran order manual", sub: pos.name || "Pelanggan walk-in", onBack: drawPOS, onPaid: async p => {
+      const o = await createPosOrder({ name: pos.name, phone: "", items: pos.cart.map(l => ({ name: l.name, opts: l.opts, note: l.note, qty: l.qty, unit: l.unit, food: l.food, gift: l.gift || null })), subtotal: total }, p, shift.shiftId);
+      pos = null; closeModal();
+      toast(p.method === "cash" && p.change > 0 ? `Order #${pad3(o.no)} disimpan. Baki: ${rm(p.change)}` : `Order #${pad3(o.no)} disimpan.`);
+      queueLabels(o, true);
+    } });
+  };
+}
+function openItemPOS(id) {
+  const it = ITEM[id]; const sel = {}; it.opts.forEach(o => sel[o.key] = o.def || 0);
+  let qty = 1, note = "", g = { on: false, to: "", from: "", msg: "" };
+  const unit = () => it.price + it.opts.reduce((s, o) => s + o.choices[sel[o.key]].p, 0);
+  const draw = () => {
+    const sh = openModal(`
+      <h2>${esc(it.name)}</h2><div class="sub num">${rm(it.price)}</div>
+      ${it.opts.map(o => `<div class="opt"><label class="t">${o.label}</label><div class="seg">${o.choices.map((c, i) => `<button data-k="${o.key}" data-x="${i}" aria-pressed="${sel[o.key] === i}">${c.n}${c.p ? ` <small>+${rm(c.p)}</small>` : ""}</button>`).join("")}</div></div>`).join("")}
+      <label class="field"><span>Nota untuk barista</span><input type="text" id="iNote" maxlength="60" value="${esc(note)}" placeholder="Cth: ais sikit"></label>
+      ${giftEditor(g)}
+      <div class="sheet-foot"><button class="btn ghost" id="iBack">Kembali</button><div class="qty"><button id="qm">−</button><span class="num">${qty}</span><button id="qp">+</button></div>
+      <button class="btn wide" id="iAdd"><span>Tambah</span><span class="num">${rm(unit() * qty)}</span></button></div>`, { onClose: drawPOS });
+    const keep = () => { note = $("#iNote").value.trim(); readGift(g); };
+    sh.querySelectorAll("[data-k]").forEach(b => b.onclick = () => { keep(); sel[b.dataset.k] = +b.dataset.x; draw(); });
+    $("#qm").onclick = () => { keep(); qty = Math.max(1, qty - 1); draw(); };
+    $("#qp").onclick = () => { keep(); qty = Math.min(20, qty + 1); draw(); };
+    bindGift(sh, g, () => { note = $("#iNote").value.trim(); draw(); });
+    $("#iBack").onclick = drawPOS;
+    $("#iAdd").onclick = () => {
+      keep();
+      const opts = it.opts.map(o => o.choices[sel[o.key]].n);
+      const gift = g.on && g.msg ? { to: g.to, from: g.from, msg: g.msg } : null;
+      const key = id + "|" + opts.join("|") + "|" + note + "|" + JSON.stringify(gift);
+      const ex = pos.cart.find(l => l.key === key);
+      if (ex) ex.qty += qty; else pos.cart.push({ key, itemId: id, name: it.name, opts, note, unit: unit(), qty, food: !!it.food, gift });
+      drawPOS();
+    };
+  };
+  draw();
+}
+// Editor ucapan (sama konsep dengan page pelanggan)
+function giftEditor(g) {
+  return `<div class="gift ${g.on ? "on" : ""}">
+    <button class="gift-tgl" id="gTgl" aria-pressed="${g.on}">♥ ${g.on ? "Ucapan pada cawan" : "Tambah ucapan pada cawan"}</button>
+    ${g.on ? `<div class="chips small">${GIFT.presets.map(p => `<button data-g="${esc(p)}">${esc(p)}</button>`).join("")}</div>
+      <div class="gift-2"><label class="field"><span>Untuk</span><input type="text" id="gTo" maxlength="${GIFT.maxName}" value="${esc(g.to)}" placeholder="Cth: Mak"></label>
+      <label class="field"><span>Dari</span><input type="text" id="gFrom" maxlength="${GIFT.maxName}" value="${esc(g.from)}" placeholder="Cth: Along"></label></div>
+      <label class="field"><span>Ucapan <small class="muted" id="gCnt">${g.msg.length}/${GIFT.maxMsg}</small></span><input type="text" id="gMsg" maxlength="${GIFT.maxMsg}" value="${esc(g.msg)}" placeholder="Tulis ucapan anda"></label>` : ""}
+  </div>`;
+}
+function readGift(g) { const a = $("#gTo"), b = $("#gFrom"), c = $("#gMsg"); if (a) g.to = a.value.trim(); if (b) g.from = b.value.trim(); if (c) g.msg = c.value.trim(); }
+function bindGift(sh, g, redraw) {
+  $("#gTgl").onclick = () => { readGift(g); g.on = !g.on; redraw(); };
+  sh.querySelectorAll("[data-g]").forEach(b => b.onclick = () => { readGift(g); g.msg = b.dataset.g; redraw(); });
+  const m = $("#gMsg"); if (m) m.oninput = () => { $("#gCnt").textContent = m.value.length + "/" + GIFT.maxMsg; };
+}
+
+/* ================= TUTUP SHIFT ================= */
+async function openEndShift() {
+  if (!isOpen()) return;
+  const sh0 = openModal(`<h2>Tutup shift</h2><p class="muted">Mengira jualan shift…</p>`);
+  let sum;
+  try { sum = await shiftSummary(shift); } catch (e) { sh0.innerHTML = `<h2>Tutup shift</h2><div class="err">Tak dapat kira jualan. Semak internet dan cuba lagi.</div><div class="sheet-foot"><button class="btn ghost" id="x">Tutup</button></div>`; $("#x").onclick = afterModal; return; }
+  const pending = orders.filter(o => ["new", "prep", "ready"].includes(o.status));
+  let counted = "", note = "", err = "", busy = false, confirmPending = false;
+  const draw = () => {
+    const c = num(counted), diff = isNaN(c) ? null : r2(c - sum.expectedCash);
+    const sh = openModal(`
+      <h2>Tutup shift</h2><div class="sub">Dibuka ${dtm(shift.openedAt)} oleh ${esc(shift.staffName || "-")}</div>
+      <div class="sumgrid">
+        <div><span>Duit permulaan</span><b class="num">${rm(shift.openingCash || 0)}</b></div>
+        <div><span>Jualan CASH</span><b class="num">${rm(sum.totals.cash)}</b></div>
+        <div><span>Jualan QRPay</span><b class="num">${rm(sum.totals.qr)}</b></div>
+        <div><span>Jualan Kad</span><b class="num">${rm(sum.totals.card)}</b></div>
+        <div class="hl"><span>Jumlah jualan</span><b class="num">${rm(sum.sales)}</b></div>
+        <div><span>Order dibayar</span><b class="num">${sum.orderCount} <small>(${sum.appCount} app · ${sum.posCount} kaunter)</small></b></div>
+        <div class="hl gold"><span>Tunai sepatutnya dalam laci</span><b class="num">${rm(sum.expectedCash)}</b></div>
+      </div>
+      ${pending.length ? `<div class="warnbox">⚠ Masih ada <b>${pending.length} order</b> belum selesai (${pending.map(o => "#" + pad3(o.no)).join(", ")}). Order yang belum dibayar tak dikira dalam shift ini.</div>` : ""}
+      <label class="field"><span>Kira tunai dalam laci sekarang (RM)</span><input type="text" inputmode="decimal" id="cC" value="${esc(counted)}" placeholder="${sum.expectedCash.toFixed(2)}"></label>
+      <div class="change ${diff == null ? "" : diff < 0 ? "short" : diff > 0 ? "over" : "ok"}" id="cDiff"><span>${diff == null ? "Beza" : diff === 0 ? "Tepat, tiada beza" : diff < 0 ? "Kurang" : "Lebih"}</span><b class="num">${diff == null ? "-" : rm(Math.abs(diff))}</b></div>
+      <label class="field"><span>Catatan (pilihan)</span><input type="text" id="cN" maxlength="120" value="${esc(note)}" placeholder="Cth: RM5 untuk beli ais"></label>
+      ${err ? `<div class="err">${esc(err)}</div>` : ""}
+      <div class="sheet-foot"><button class="btn ghost" id="cBack">Batal</button><button class="btn wide" id="cOk" ${busy ? "disabled" : ""}><span>${busy ? "Menutup…" : confirmPending ? "Ya, tutup juga" : "Tutup shift"}</span><span>→</span></button></div>`);
+    const keep = () => { counted = $("#cC").value.trim(); note = $("#cN").value.trim(); };
+    $("#cC").oninput = () => { const v = num($("#cC").value), d = isNaN(v) ? null : r2(v - sum.expectedCash), box = $("#cDiff"); box.className = "change " + (d == null ? "" : d < 0 ? "short" : d > 0 ? "over" : "ok"); box.querySelector("span").textContent = d == null ? "Beza" : d === 0 ? "Tepat, tiada beza" : d < 0 ? "Kurang" : "Lebih"; box.querySelector("b").textContent = d == null ? "-" : rm(Math.abs(d)); };
+    $("#cBack").onclick = afterModal;
+    $("#cOk").onclick = async () => {
+      keep();
+      const cc = num(counted);
+      if (isNaN(cc) || cc < 0) { err = "Sila masukkan jumlah tunai yang dikira dalam laci."; draw(); return; }
+      if (pending.length && !confirmPending) { confirmPending = true; err = ""; draw(); return; }
+      busy = true; draw();
+      try {
+        const res = await closeShift(shift, { countedCash: cc, note, email: staffEmail });
+        showShiftReport(res);
+      } catch (e) { console.error(e); busy = false; err = "Tak berjaya tutup shift. Cuba lagi."; draw(); }
+    };
+  };
+  draw();
+}
+function showShiftReport(s) {
+  const v = s.variance || 0;
+  const sh = openModal(`
+    <h2>Shift ditutup ✓</h2><div class="sub">${dtm(s.openedAt)} – ${tm(s.closedAt)} · ${esc(s.staffName || "")}</div>
+    <div class="sumgrid">
+      <div><span>CASH</span><b class="num">${rm(s.totals.cash)}</b></div>
+      <div><span>QRPay</span><b class="num">${rm(s.totals.qr)}</b></div>
+      <div><span>Kad</span><b class="num">${rm(s.totals.card)}</b></div>
+      <div class="hl"><span>Jumlah jualan</span><b class="num">${rm(s.sales)}</b></div>
+      <div><span>Tunai dijangka</span><b class="num">${rm(s.expectedCash)}</b></div>
+      <div><span>Tunai dikira</span><b class="num">${rm(s.countedCash)}</b></div>
+      <div class="hl ${v < 0 ? "red" : v > 0 ? "gold" : ""}"><span>Beza</span><b class="num">${v === 0 ? "Tepat" : (v > 0 ? "+" : "−") + rm(Math.abs(v))}</b></div>
+    </div>
+    ${s.note ? `<p class="muted">Catatan: ${esc(s.note)}</p>` : ""}
+    <p class="muted">Laporan ini disimpan dalam "Sejarah shift". Order baru dikunci sehingga shift seterusnya dibuka.</p>
+    <div class="sheet-foot"><button class="btn wide" id="rOk"><span>Selesai</span><span>✓</span></button></div>`);
+  $("#rOk").onclick = afterModal;
+}
+
+/* ================= STICKER PER-ITEM ================= */
+function labelsFor(o) {
+  const items = o.items.filter(i => LABEL.food || !i.food);
+  const total = items.reduce((s, i) => s + i.qty, 0);
+  const out = []; let n = 0;
+  items.forEach(i => { for (let q = 0; q < i.qty; q++) { n++; out.push({ i, n, total }); } });
+  return out;
+}
+function labelHTML(o, { i, n, total }) {
+  const g = i.gift && i.gift.msg ? i.gift : null;
+  const item = `<div class="lbl">
+    <div class="l-top"><b>#${pad3(o.no)}</b><span>${esc(o.name || (o.source === "pos" ? "Kaunter" : ""))}</span><span class="num">${n}/${total}</span></div>
+    <div class="l-name">${esc(i.name)}</div>
+    ${i.opts.length ? `<div class="l-opt">${esc(i.opts.join(" · "))}</div>` : ""}
+    ${i.note ? `<div class="l-note">* ${esc(i.note)}</div>` : ""}
+    <div class="l-foot"><span>${esc(OUTLET.name)} · ${tm(o.createdAt)}</span>${g ? `<span class="l-heart">♥ ada ucapan</span>` : ""}</div>
+  </div>`;
+  if (!g) return item;
+  return item + `<div class="lbl gift-lbl">
+    ${g.to ? `<div class="g-to">♥ Untuk ${esc(g.to)} ♥</div>` : `<div class="g-to">♥</div>`}
+    <div class="g-msg">“${esc(g.msg)}”</div>
+    ${g.from ? `<div class="g-from">— ${esc(g.from)}</div>` : ""}
+    <div class="g-brand">${esc(OUTLET.name)} · Goodness in Every Sip</div>
+  </div>`;
+}
 let queue = [];
-function queueDocket(o, print) {
+function queueLabels(o, print) {
   if (queue.some(q => q.o.id === o.id)) return;
   queue.push({ o, print });
-  if (!$("#modal").innerHTML) nextDocket(true);
+  if (!$("#modal").innerHTML) nextLabels();
 }
-function nextDocket(fromQueue) {
-  if (!fromQueue) { closeModal(); }
-  const item = queue.shift(); if (!item) { closeModal(); return; }
+function nextLabels() {
+  const item = queue.shift(); if (!item) { afterModal(); return; }
   const { o, print } = item;
-  openModal(`<h2>Docket dapur #${pad3(o.no)}</h2>
-    <div class="sub">Kertas thermal 80mm.</div>
-    <div class="docket-wrap"><div class="paper">${docketHTML(o)}</div></div>
-    <div class="sheet-foot" style="flex-wrap:wrap"><button class="btn ghost" id="dClose">Tutup</button><button class="btn wide" id="dPrint"><span>Print docket</span><span>⎙</span></button></div>`,
-  () => {
-    $("#dClose").onclick = () => nextDocket();
-    $("#dPrint").onclick = () => doPrint(o);
-    if (print) setTimeout(() => doPrint(o), 300);
-  });
+  const L = labelsFor(o), html = L.map(x => labelHTML(o, x)).join("");
+  const count = (html.match(/class="lbl/g) || []).length;
+  const sh = openModal(`<h2>Sticker order #${pad3(o.no)}</h2>
+    <div class="sub">${count} sticker · ${LABEL.width}×${LABEL.height}mm · satu sticker untuk setiap cawan${count > L.length ? ", berserta sticker ucapan" : ""}.</div>
+    <div class="lbl-preview">${html || `<p class="muted">Tiada item untuk dicetak.</p>`}</div>
+    <div class="sheet-foot" style="flex-wrap:wrap"><button class="btn ghost" id="dClose">Tutup</button><button class="btn wide" id="dPrint" ${count ? "" : "disabled"}><span>Print sticker</span><span>⎙</span></button></div>`,
+    { onClose: () => { closeModal(); nextLabels(); } });
+  $("#dClose").onclick = () => { closeModal(); nextLabels(); };
+  $("#dPrint").onclick = () => doPrint(o, html);
+  if (print && count) setTimeout(() => doPrint(o, html), 300);
 }
-async function doPrint(o) {
-  $("#printArea").innerHTML = `<div class="paper print">${docketHTML(o)}</div>`;
+function doPrint(o, html) {
+  $("#printArea").innerHTML = html;
   window.print();
   const cur = orders.find(x => x.id === o.id);
-  updateOrder(o.id, { printed: (cur?.printed || 0) + 1 }).catch(() => {});
-  setTimeout(() => nextDocket(), 400);
+  updateOrder(o.id, { printed: (cur?.printed || o.printed || 0) + 1 }).catch(() => {});
+  setTimeout(() => { closeModal(); nextLabels(); }, 400);
 }
+
 staffWatch((staff, reason) => {
   if (!staff) {
     $("#login").hidden = false; $("#view-outlet").hidden = true; $("#who").hidden = true;
     if (reason) { $("#lErr").textContent = reason; $("#lErr").hidden = false; }
     return;
   }
+  staffEmail = staff.email;
   $("#login").hidden = true; $("#view-outlet").hidden = false;
   $("#who").hidden = false; $("#who").innerHTML = `${esc(staff.email)} <button id="logout">Log keluar</button>`;
   $("#logout").onclick = () => staffLogout();

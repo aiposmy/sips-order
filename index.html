@@ -30,8 +30,8 @@
 <div class="toast" id="toast" hidden></div>
 
 <script type="module">
-import { MENU, LOYALTY } from "./config.js";
-import { LIVE, pointsFor, customerInit, onCustomerAuth, createOrder, watchMyOrder, watchMyOrders,
+import { MENU, LOYALTY, GIFT } from "./config.js";
+import { LIVE, pointsFor, customerInit, onCustomerAuth, createOrder, watchMyOrder, watchMyOrders, watchShift,
   signUpEmail, signInEmail, signInGoogle, resetPassword, signOutCustomer, watchMember, updateProfile, redeemReward } from "./data.js";
 
 const $ = s => document.querySelector(s);
@@ -78,8 +78,10 @@ function openModal(draw) {
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
 
 /* ---------- akaun ---------- */
+let shopOpen = null, shiftWatching = false;
 onCustomerAuth(async u => {
   user = u;
+  if (u && !shiftWatching) { shiftWatching = true; watchShift(s => { shopOpen = !!(s && s.open); if (!$("#modal").innerHTML) render(); }); }
   unMember && unMember(); unMember = null; member = null;
   if (u && u.member) {
     unMember = await watchMember(u.uid, m => {
@@ -223,6 +225,7 @@ function render() {
       <div class="where2"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8h12l-1 13H7z" fill="var(--honey)"/><path d="M9 8V6a3 3 0 0 1 6 0v2" stroke="var(--honey)" stroke-width="2" fill="none"/></svg><b>Takeaway</b><span>· ambil di kaunter</span></div>
       <div class="h-pic"><img src="img/hero.webp" alt="Air barli SIPS sejuk dengan ais" width="300" height="408" fetchpriority="high"></div>
     </section>
+    ${shopOpen === false ? `<div class="closed-note"><b>Outlet sedang tutup.</b> Anda boleh lihat menu dulu. Order boleh dihantar bila outlet dibuka.</div>` : ""}
     ${user ? promo() : ""}
     <div class="chips" role="toolbar" aria-label="Kategori">
       <button data-cat="all" aria-pressed="${cat === "all"}">Semua</button>
@@ -249,28 +252,56 @@ function updateCartBar() {
 }
 function openItem(id) {
   const it = ITEM[id]; const sel = {}; it.opts.forEach(o => sel[o.key] = o.def || 0); let qty = 1, note = "";
+  const g = { on: false, to: "", from: "", msg: "" };
   const unit = () => it.price + it.opts.reduce((s, o) => s + o.choices[sel[o.key]].p, 0);
   openModal(function draw(sh) {
     sh.innerHTML = `
       <div class="it-head"><span class="it-pic">${pic(it)}</span>
       <div><h2>${esc(it.name)}</h2><div class="sub">${esc(it.desc)}</div><div class="price num">${rm(it.price)}</div></div></div>
       ${it.opts.map(o => `<div class="opt"><label class="t">${o.label}</label><div class="seg">${o.choices.map((c, i) => `<button data-k="${o.key}" data-i="${i}" aria-pressed="${sel[o.key] === i}">${c.n}${c.p ? ` <small>+${rm(c.p)}</small>` : ""}</button>`).join("")}</div></div>`).join("")}
-      <label class="field"><span>Nota untuk dapur</span><input type="text" id="itemNote" maxlength="80" placeholder="Cth: ais sikit, tanpa straw" value="${esc(note)}"></label>
+      <label class="field"><span>Nota untuk barista</span><input type="text" id="itemNote" maxlength="60" placeholder="Cth: ais sikit, tanpa straw" value="${esc(note)}"></label>
+      ${it.food ? "" : giftBox(g)}
       <div class="sheet-foot"><div class="qty"><button id="qm" aria-label="Kurang">−</button><span class="num">${qty}</span><button id="qp" aria-label="Tambah">+</button></div>
       <button class="btn wide" id="addBtn"><span>Masuk troli</span><span class="num">${rm(unit() * qty)}</span></button></div>`;
-    const keep = () => note = $("#itemNote").value;
-    sh.querySelectorAll(".seg button").forEach(b => b.onclick = () => { keep(); sel[b.dataset.k] = +b.dataset.i; draw(sh); });
+    const keep = () => { note = $("#itemNote").value; readGift(g); };
+    bindGift(sh, g, () => { note = $("#itemNote").value; draw(sh); });
+    sh.querySelectorAll(".seg button[data-k]").forEach(b => b.onclick = () => { keep(); sel[b.dataset.k] = +b.dataset.i; draw(sh); });
     $("#qm").onclick = () => { keep(); qty = Math.max(1, qty - 1); draw(sh); };
     $("#qp").onclick = () => { keep(); qty = Math.min(20, qty + 1); draw(sh); };
     $("#addBtn").onclick = () => {
-      note = $("#itemNote").value.trim();
+      note = $("#itemNote").value.trim(); readGift(g);
       const opts = it.opts.map(o => o.choices[sel[o.key]].n);
-      const key = id + "|" + opts.join("|") + "|" + note;
+      const gift = g.on && g.msg ? { to: g.to, from: g.from, msg: g.msg } : null;
+      const key = id + "|" + opts.join("|") + "|" + note + "|" + JSON.stringify(gift);
       const ex = cart.find(l => l.key === key);
-      if (ex) ex.qty += qty; else cart.push({ key, itemId: id, name: it.name, opts, note, unit: unit(), qty, food: !!it.food });
-      saveCart(); closeModal(); render(); toast(`${qty}× ${it.name} masuk troli`);
+      if (ex) ex.qty += qty; else cart.push({ key, itemId: id, name: it.name, opts, note, unit: unit(), qty, food: !!it.food, gift });
+      saveCart(); closeModal(); render(); toast(gift ? `${qty}× ${it.name} dengan ucapan anda ♥` : `${qty}× ${it.name} masuk troli`);
     };
   });
+}
+
+/* ---------- ucapan pada cawan ---------- */
+function giftBox(g) {
+  if (!g.on) return `<button class="giftcta" id="gTgl" type="button"><span class="gc-ico">💌</span><span><b>Jadikan cawan ini hadiah</b><small>Tulis ucapan untuk orang tersayang. Kami cetak pada sticker cawan.</small></span><span class="gc-add">＋</span></button>`;
+  return `<div class="giftbox">
+    <div class="gb-head"><b>💌 Ucapan pada cawan</b><button class="linkish" id="gTgl" type="button">Buang</button></div>
+    <div class="gb-chips">${GIFT.presets.map(p => `<button type="button" data-g="${esc(p)}" aria-pressed="${g.msg === p}">${esc(p)}</button>`).join("")}</div>
+    <div class="gb-2"><label class="field"><span>Untuk</span><input type="text" id="gTo" maxlength="${GIFT.maxName}" value="${esc(g.to)}" placeholder="Cth: Mak, Sayang"></label>
+    <label class="field"><span>Dari</span><input type="text" id="gFrom" maxlength="${GIFT.maxName}" value="${esc(g.from)}" placeholder="Cth: Along"></label></div>
+    <label class="field"><span>Ucapan anda <small id="gCnt">${g.msg.length}/${GIFT.maxMsg}</small></span><textarea id="gMsg" rows="2" maxlength="${GIFT.maxMsg}" placeholder="Tulis dari hati…">${esc(g.msg)}</textarea></label>
+    <div class="gb-prev" aria-label="Pratonton sticker"><span class="gp-tag">Pratonton sticker</span>
+      <div class="gp-to" id="pvTo">${g.to ? "♥ Untuk " + esc(g.to) + " ♥" : "♥"}</div>
+      <div class="gp-msg" id="pvMsg">${g.msg ? "“" + esc(g.msg) + "”" : "Ucapan anda di sini"}</div>
+      <div class="gp-from" id="pvFrom">${g.from ? "— " + esc(g.from) : ""}</div></div>
+  </div>`;
+}
+function readGift(g) { const a = $("#gTo"), b = $("#gFrom"), c = $("#gMsg"); if (a) g.to = a.value.trim(); if (b) g.from = b.value.trim(); if (c) g.msg = c.value.trim(); }
+function bindGift(sh, g, redraw) {
+  const t = $("#gTgl"); if (!t) return;
+  t.onclick = () => { readGift(g); g.on = !g.on; if (!g.on) { g.to = g.from = g.msg = ""; } redraw(); if (g.on) setTimeout(() => $("#gMsg")?.scrollIntoView({ block: "center", behavior: "smooth" }), 50); };
+  sh.querySelectorAll("[data-g]").forEach(b => b.onclick = () => { readGift(g); g.msg = b.dataset.g; redraw(); });
+  const live = () => { readGift(g); $("#gCnt").textContent = g.msg.length + "/" + GIFT.maxMsg; $("#pvTo").textContent = g.to ? "♥ Untuk " + g.to + " ♥" : "♥"; $("#pvMsg").textContent = g.msg ? "“" + g.msg + "”" : "Ucapan anda di sini"; $("#pvFrom").textContent = g.from ? "— " + g.from : ""; };
+  ["gTo", "gFrom", "gMsg"].forEach(i => { const el = $("#" + i); if (el) el.oninput = live; });
 }
 
 /* ---------- checkout ---------- */
@@ -286,7 +317,7 @@ function openCart() {
     sh.innerHTML = `
       <h2>Troli anda</h2><div class="sub">${cartQty()} item · Takeaway, ambil di kaunter</div>
       ${cart.map((l, i) => `<div class="line"><span class="nm">${esc(l.name)}</span>
-        <span class="op">${esc([...l.opts, l.note && ("Nota: " + l.note)].filter(Boolean).join(" · ")) || "&nbsp;"}</span>
+        <span class="op">${esc([...l.opts, l.note && ("Nota: " + l.note)].filter(Boolean).join(" · ")) || "&nbsp;"}${l.gift ? `<span class="gline">♥ ${l.gift.to ? "Untuk " + esc(l.gift.to) + ": " : ""}“${esc(l.gift.msg)}”${l.gift.from ? " — " + esc(l.gift.from) : ""}</span>` : ""}</span>
         <span class="ctl"><span class="num" style="font-weight:700">${rm(l.unit * l.qty)}</span>
         <span class="qty"><button data-m="${i}" aria-label="Kurang">−</button><span class="num">${l.qty}</span><button data-p="${i}" aria-label="Tambah">+</button></span></span></div>`).join("")}
 
@@ -316,13 +347,14 @@ function openCart() {
     $("#cSend").onclick = async () => {
       keep();
       if (!custName) { err = "Sila isi nama supaya staff boleh panggil bila order siap."; draw(sh); return; }
+      if (shopOpen === false) { err = "Outlet sedang tutup. Order boleh dihantar bila outlet dibuka."; draw(sh); return; }
       const btn = $("#cSend"); btn.disabled = true; btn.firstElementChild.textContent = "Menghantar…";
       try {
         await customerInit();
         const v = chosenVoucher ? { id: chosenVoucher.id, value: chosenVoucher.value, title: chosenVoucher.title } : null;
         const r = await createOrder({
           name: custName, phone: custPhone,
-          items: cart.map(l => ({ name: l.name, opts: l.opts, note: l.note, qty: l.qty, unit: l.unit, food: l.food })),
+          items: cart.map(l => ({ name: l.name, opts: l.opts, note: l.note, qty: l.qty, unit: l.unit, food: l.food, gift: l.gift || null })),
           subtotal: sub
         }, v);
         ls.set("sips.name", custName); ls.set("sips.phone", custPhone);
@@ -330,7 +362,7 @@ function openCart() {
         closeModal(); startWatch(); render();
       } catch (e) {
         console.error(e);
-        err = e.message === "Voucher dah digunakan." ? "Voucher ini dah digunakan. Pilih voucher lain." : "Order tak berjaya dihantar. Semak internet dan cuba lagi.";
+        err = e.message === "Voucher dah digunakan." ? "Voucher ini dah digunakan. Pilih voucher lain." : e.message === "SHIFT_CLOSED" ? "Outlet sedang tutup. Order boleh dihantar bila outlet dibuka." : "Order tak berjaya dihantar. Semak internet dan cuba lagi.";
         if (e.message === "Voucher dah digunakan.") chosenVoucher = null;
         draw(sh);
       }

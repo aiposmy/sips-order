@@ -22,7 +22,7 @@ async function F() {
 }
 
 /* ================= MOD DEMO (satu browser, sync antara tab) ================= */
-const K = { orders: "sips.demo.orders", members: "sips.demo.members", accounts: "sips.demo.accounts", session: "sips.demo.session", guest: "sips.demo.uid" };
+const K = { orders: "sips.demo.orders", members: "sips.demo.members", accounts: "sips.demo.accounts", session: "sips.demo.session", guest: "sips.demo.uid", shift: "sips.demo.shift", shifts: "sips.demo.shifts" };
 const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch (e) { return d; } };
 const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} demo.fire(); };
 const demo = { subs: new Set(), fire() { demo.subs.forEach(f => f()); } };
@@ -201,8 +201,9 @@ export async function createOrder(order, voucher) {
   const day = today();
   const discount = voucher ? voucher.value : 0;
   const base = { ...order, type: "take", table: "", discount, voucherId: voucher ? voucher.id : "", voucherTitle: voucher ? voucher.title : "",
-    total: order.subtotal - discount, status: "new", printed: 0, pointsAwarded: false };
+    total: order.subtotal - discount, status: "new", printed: 0, pointsAwarded: false, source: "app", paid: false };
   if (!LIVE) {
+    if (!load(K.shift, {}).open) throw new Error("SHIFT_CLOSED");
     const me = demoUser(), m = load(K.orders, {});
     const no = Object.values(m).filter(o => o.day === day).length + 1;
     const id = newId();
@@ -216,8 +217,11 @@ export async function createOrder(order, voucher) {
   const counter = fs.doc(D, "meta", "counter");
   const ref = fs.doc(fs.collection(D, "orders"));
   const vref = voucher ? fs.doc(D, "members", uid, "vouchers", voucher.id) : null;
+  const sref = fs.doc(D, "meta", "shift");
   const no = await fs.runTransaction(D, async tx => {
     const c = await tx.get(counter);
+    const sh = await tx.get(sref);
+    if (!sh.exists() || !sh.data().open) throw new Error("SHIFT_CLOSED");
     if (vref) { const v = await tx.get(vref); if (!v.exists() || v.data().status !== "active") throw new Error("Voucher dah digunakan."); }
     const cur = c.exists() ? c.data() : null;
     const n = cur && cur.day === day ? cur.n + 1 : 1;
@@ -280,14 +284,15 @@ export async function deleteOrder(id) {
   if (!LIVE) { const m = load(K.orders, {}); delete m[id]; store(K.orders, m); return; }
   const { fs, D } = await F(); await fs.deleteDoc(fs.doc(D, "orders", id));
 }
-// "Dah diambil": tandakan selesai & beri point kepada ahli (sekali sahaja)
-export async function completeOrder(o) {
+// "Dah diambil": rekod bayaran (jika belum), tandakan selesai & beri point kepada ahli (sekali sahaja)
+export async function completeOrder(o, payment, shiftId) {
+  const payPatch = (!o.paid && payment) ? { paid: true, payment, paidAt: Date.now(), shiftId } : {};
   const pts = pointsFor(o.total);
   if (!LIVE) {
     const m = load(K.orders, {}), x = m[o.id]; if (!x) return 0;
     let given = 0;
     if (x.member && !x.pointsAwarded) { const mm = load(K.members, {}); if (mm[x.uid]) { mm[x.uid].points += pts; mm[x.uid].lifetime += pts; store(K.members, mm); given = pts; } }
-    Object.assign(x, { status: "done", doneAt: Date.now(), pointsAwarded: x.pointsAwarded || !!given, points: x.points || given });
+    Object.assign(x, payPatch, { status: "done", doneAt: Date.now(), pointsAwarded: x.pointsAwarded || !!given, points: x.points || given });
     store(K.orders, m); return given;
   }
   const { fs, D } = await F();
@@ -297,7 +302,7 @@ export async function completeOrder(o) {
     let given = 0, mref = null, ms = null;
     if (x.member && !x.pointsAwarded) { mref = fs.doc(D, "members", x.uid); ms = await tx.get(mref); }
     if (ms && ms.exists()) { const d = ms.data(); tx.update(mref, { points: (d.points || 0) + pts, lifetime: (d.lifetime || 0) + pts }); given = pts; }
-    tx.update(oref, { status: "done", doneAt: Date.now(), pointsAwarded: x.pointsAwarded || !!given, points: x.points || given });
+    tx.update(oref, { ...payPatch, status: "done", doneAt: Date.now(), pointsAwarded: x.pointsAwarded || !!given, points: x.points || given });
     return given;
   });
 }
@@ -312,4 +317,94 @@ export async function cancelOrder(o) {
   b.update(fs.doc(D, "orders", o.id), { status: "cancel", cancelAt: Date.now() });
   if (o.voucherId) b.update(fs.doc(D, "members", o.uid, "vouchers", o.voucherId), { status: "active", usedOrder: "", usedAt: 0 });
   await b.commit();
+}
+
+/* ======================= SHIFT ======================= */
+// meta/shift = status shift semasa outlet (satu shift pada satu masa untuk semua peranti)
+export async function watchShift(cb) {
+  if (!LIVE) return demoSub(() => cb(load(K.shift, { open: false })));
+  const { fs, D } = await F();
+  return fs.onSnapshot(fs.doc(D, "meta", "shift"), s => cb(s.exists() ? s.data() : { open: false }), () => cb({ open: false }));
+}
+export async function openShift({ staffName, openingCash, email }) {
+  const now = Date.now();
+  if (!LIVE) {
+    if (load(K.shift, {}).open) throw new Error("Shift dah dibuka.");
+    const id = "s" + newId(), sh = load(K.shifts, {});
+    sh[id] = { id, status: "open", day: today(), openedAt: now, openedBy: email, staffName, openingCash };
+    store(K.shifts, sh); store(K.shift, { open: true, shiftId: id, openedAt: now, staffName, openingCash }); return id;
+  }
+  const { fs, D } = await F();
+  const meta = fs.doc(D, "meta", "shift"), ref = fs.doc(fs.collection(D, "shifts"));
+  await fs.runTransaction(D, async tx => {
+    const m = await tx.get(meta);
+    if (m.exists() && m.data().open) throw new Error("Shift dah dibuka oleh peranti lain.");
+    tx.set(ref, { status: "open", day: today(), openedAt: now, openedBy: email, staffName, openingCash });
+    tx.set(meta, { open: true, shiftId: ref.id, openedAt: now, staffName, openingCash });
+  });
+  return ref.id;
+}
+async function shiftOrders(shiftId) {
+  if (!LIVE) return Object.values(load(K.orders, {})).filter(o => o.shiftId === shiftId);
+  const { fs, D } = await F();
+  const s = await fs.getDocs(fs.query(fs.collection(D, "orders"), fs.where("shiftId", "==", shiftId)));
+  return s.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+// Ringkasan jualan shift: ikut cara bayaran
+export async function shiftSummary(shift) {
+  const list = (await shiftOrders(shift.shiftId)).filter(o => o.paid && o.status !== "cancel");
+  const totals = { cash: 0, qr: 0, card: 0 };
+  list.forEach(o => { const k = o.payment?.method; if (k in totals) totals[k] = Math.round((totals[k] + o.total) * 100) / 100; });
+  const sales = Math.round((totals.cash + totals.qr + totals.card) * 100) / 100;
+  const expectedCash = Math.round(((shift.openingCash || 0) + totals.cash) * 100) / 100;
+  return { totals, sales, orderCount: list.length, expectedCash, appCount: list.filter(o => o.source !== "pos").length, posCount: list.filter(o => o.source === "pos").length };
+}
+export async function closeShift(shift, { countedCash, note, email }) {
+  const sum = await shiftSummary(shift);
+  const closed = { status: "closed", closedAt: Date.now(), closedBy: email, countedCash, note: note || "",
+    expectedCash: sum.expectedCash, variance: Math.round((countedCash - sum.expectedCash) * 100) / 100,
+    totals: sum.totals, sales: sum.sales, orderCount: sum.orderCount };
+  if (!LIVE) {
+    const sh = load(K.shifts, {}); Object.assign(sh[shift.shiftId], closed); store(K.shifts, sh);
+    store(K.shift, { open: false, lastShiftId: shift.shiftId, closedAt: closed.closedAt }); return { ...sh[shift.shiftId] };
+  }
+  const { fs, D } = await F();
+  const b = fs.writeBatch(D);
+  b.update(fs.doc(D, "shifts", shift.shiftId), closed);
+  b.set(fs.doc(D, "meta", "shift"), { open: false, lastShiftId: shift.shiftId, closedAt: closed.closedAt });
+  await b.commit();
+  const s = await fs.getDoc(fs.doc(D, "shifts", shift.shiftId));
+  return { id: s.id, ...s.data() };
+}
+export async function listShifts(n = 10) {
+  if (!LIVE) return Object.values(load(K.shifts, {})).sort((a, b) => b.openedAt - a.openedAt).slice(0, n);
+  const { fs, D } = await F();
+  const s = await fs.getDocs(fs.query(fs.collection(D, "shifts"), fs.orderBy("openedAt", "desc"), fs.limit(n)));
+  return s.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+
+/* ======================= ORDER MANUAL (KAUNTER) ======================= */
+// order: {name, phone, items, subtotal}; payment: {method, amount, tendered, change, ref}
+export async function createPosOrder(order, payment, shiftId) {
+  const day = today(), now = Date.now();
+  const base = { ...order, type: "take", table: "", discount: 0, voucherId: "", voucherTitle: "", total: order.subtotal,
+    status: "prep", prepAt: now, printed: 0, pointsAwarded: false, member: false, source: "pos",
+    paid: true, payment, paidAt: now, shiftId };
+  if (!LIVE) {
+    const sh = load(K.shift, {}); if (!sh.open || sh.shiftId !== shiftId) throw new Error("SHIFT_CLOSED");
+    const m = load(K.orders, {}); const no = Object.values(m).filter(o => o.day === day).length + 1; const id = newId();
+    m[id] = { ...base, id, no, day, uid: "staff", createdAt: now }; store(K.orders, m);
+    return { ...m[id] };
+  }
+  const { fs, A, D } = await F();
+  const counter = fs.doc(D, "meta", "counter"), sref = fs.doc(D, "meta", "shift"), ref = fs.doc(fs.collection(D, "orders"));
+  const no = await fs.runTransaction(D, async tx => {
+    const c = await tx.get(counter); const sh = await tx.get(sref);
+    if (!sh.exists() || !sh.data().open || sh.data().shiftId !== shiftId) throw new Error("SHIFT_CLOSED");
+    const cur = c.exists() ? c.data() : null; const n = cur && cur.day === day ? cur.n + 1 : 1;
+    tx.set(counter, { day, n });
+    tx.set(ref, { ...base, no: n, day, uid: A.currentUser.uid, createdAt: now, ts: fs.serverTimestamp() });
+    return n;
+  });
+  return { ...base, id: ref.id, no, day, createdAt: now };
 }
