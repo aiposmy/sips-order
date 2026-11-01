@@ -31,7 +31,7 @@
 
 <script type="module">
 import { LOYALTY, GIFT } from "./config.js";
-import { LIVE, pointsFor, watchMenu, buildMenu, customerInit, onCustomerAuth, createOrder, watchMyOrder, watchMyOrders, watchShift,
+import { LIVE, pointsFor, watchMenu, buildMenu, customerInit, onCustomerAuth, createOrder, watchMyOrder, watchMyOrders, watchShift, watchQueue, etaMinutes,
   signUpEmail, signInEmail, signInGoogle, resetPassword, signOutCustomer, watchMember, updateProfile, redeemReward } from "./data.js";
 
 const $ = s => document.querySelector(s);
@@ -83,10 +83,10 @@ function openModal(draw) {
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
 
 /* ---------- akaun ---------- */
-let shopOpen = null, shiftWatching = false;
+let shopOpen = null, shiftWatching = false, queue = null;
 onCustomerAuth(async u => {
   user = u;
-  if (u && !shiftWatching) { shiftWatching = true; watchShift(s => { shopOpen = !!(s && s.open); if (!$("#modal").innerHTML) render(); }); }
+  if (u && !shiftWatching) { shiftWatching = true; watchShift(s => { shopOpen = !!(s && s.open); if (!$("#modal").innerHTML) render(); }); watchQueue(q => { queue = q; if (!$("#modal").innerHTML) render(); }); }
   unMember && unMember(); unMember = null; member = null;
   if (u && u.member) {
     unMember = await watchMember(u.uid, m => {
@@ -230,7 +230,9 @@ function render() {
       <div class="where2"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8h12l-1 13H7z" fill="var(--honey)"/><path d="M9 8V6a3 3 0 0 1 6 0v2" stroke="var(--honey)" stroke-width="2" fill="none"/></svg><b>Takeaway</b><span>· ambil di kaunter</span></div>
       <div class="h-pic"><img src="img/hero.webp" alt="Air barli SIPS sejuk dengan ais" width="300" height="408" fetchpriority="high"></div>
     </section>
-    ${shopOpen === false ? `<div class="closed-note"><b>Outlet sedang tutup.</b> Anda boleh lihat menu dulu. Order boleh dihantar bila outlet dibuka.</div>` : ""}
+    ${shopOpen === false ? `<div class="closed-note"><b>Outlet sedang tutup.</b> Anda boleh lihat menu dulu. Order boleh dihantar bila outlet dibuka.</div>`
+      : queueBusy() ? `<div class="closed-note"><b>${queue.paused ? "Order online dijeda sebentar." : "Outlet sedang sangat sibuk."}</b> Sila cuba sebentar lagi, atau order terus di kaunter.</div>`
+      : shopOpen && queue ? `<div class="eta-note">⏱ Anggaran siap sekarang: <b>~${etaMinutes(queue.cups || 0, 1)} minit</b> selepas order dihantar.</div>` : ""}
     ${user ? promo() : ""}
     <div class="chips" role="toolbar" aria-label="Kategori">
       <button data-cat="all" aria-pressed="${cat === "all"}">Semua</button>
@@ -335,6 +337,7 @@ function openCart() {
           : `<p class="muted" style="margin:0">Tiada voucher aktif.</p>`}</div>`
       : `<button class="promo slim" id="joinBtn"><span><b>Belum ahli?</b> Daftar sekarang, terus dapat ${esc(LOYALTY.welcome.title.charAt(0).toLowerCase() + LOYALTY.welcome.title.slice(1))} untuk order ini${pointsFor(sub) ? ` dan ${pointsFor(sub)} point` : ""}.</span><span class="go">Daftar →</span></button>`}
 
+      ${shopOpen && queue && !queueBusy() ? `<div class="eta-note">⏱ Anggaran siap: <b>~${etaMinutes(queue.cups || 0, cart.reduce((s, l) => s + (l.food ? 0 : l.qty), 0))} minit</b>. Kami akan beritahu bila siap.</div>` : ""}
       <div class="sums">
         <div><span>Subtotal</span><span class="num">${rm(sub)}</span></div>
         ${disc ? `<div class="disc"><span>${esc(chosenVoucher.title)}</span><span class="num">-${rm(disc)}</span></div>` : ""}
@@ -356,6 +359,7 @@ function openCart() {
       keep();
       if (!custName) { err = "Sila isi nama supaya staff boleh panggil bila order siap."; draw(sh); return; }
       if (shopOpen === false) { err = "Outlet sedang tutup. Order boleh dihantar bila outlet dibuka."; draw(sh); return; }
+      if (queueBusy()) { err = queue.paused ? "Order online dijeda sebentar. Sila cuba lagi nanti." : "Outlet sedang sangat sibuk. Sila cuba sebentar lagi."; draw(sh); return; }
       const gone = cart.filter(l => ITEM[l.itemId]?.soldOut || !ITEM[l.itemId]);
       if (gone.length) { err = `${gone.map(l => l.name).join(", ")} dah habis. Sila buang dari troli dulu.`; draw(sh); return; }
       const btn = $("#cSend"); btn.disabled = true; btn.firstElementChild.textContent = "Menghantar…";
@@ -366,13 +370,14 @@ function openCart() {
           name: custName, phone: custPhone,
           items: cart.map(l => ({ pid: l.itemId, cat: catOf(l.itemId), name: l.name, opts: l.opts, note: l.note, qty: l.qty, unit: l.unit, food: l.food, gift: l.gift || null })),
           subtotal: sub
-        }, v);
+        }, v, queue);
+        askNotify();
         ls.set("sips.name", custName); ls.set("sips.phone", custPhone);
         myOrder = r; ls.set("sips.myorder", r); cart = []; saveCart(); chosenVoucher = null;
         closeModal(); startWatch(); render();
       } catch (e) {
         console.error(e);
-        err = e.message === "Voucher dah digunakan." ? "Voucher ini dah digunakan. Pilih voucher lain." : e.message === "SHIFT_CLOSED" ? "Outlet sedang tutup. Order boleh dihantar bila outlet dibuka." : "Order tak berjaya dihantar. Semak internet dan cuba lagi.";
+        err = e.message === "Voucher dah digunakan." ? "Voucher ini dah digunakan. Pilih voucher lain." : e.message === "SHIFT_CLOSED" ? "Outlet sedang tutup. Order boleh dihantar bila outlet dibuka." : e.message === "PAUSED" ? "Order online dijeda sebentar. Sila cuba lagi nanti." : e.message === "FULL" ? "Outlet sedang sangat sibuk. Sila cuba sebentar lagi." : "Order tak berjaya dihantar. Semak internet dan cuba lagi.";
         if (e.message === "Voucher dah digunakan.") chosenVoucher = null;
         draw(sh);
       }
@@ -381,27 +386,61 @@ function openCart() {
 }
 
 /* ---------- status order sendiri ---------- */
-const STEPS = [["new", "Diterima"], ["prep", "Disediakan"], ["ready", "Siap"]];
+function queueBusy() { return !!(queue && (queue.paused || (queue.orders || 0) >= (queue.max || 15))); }
+// Notifikasi bila order siap (bunyi, getar, notifikasi browser jika dibenarkan)
+function askNotify() { try { if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {}); } catch (e) {} }
+let lastSt = null, actx = null;
+function ding() {
+  try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); [988, 1319].forEach((f, i) => { const o = actx.createOscillator(), g = actx.createGain(); o.frequency.value = f; const t = actx.currentTime + i * .18; g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(.3, t + .02); g.gain.exponentialRampToValueAtTime(.001, t + .4); o.connect(g).connect(actx.destination); o.start(t); o.stop(t + .45); }); } catch (e) {}
+  try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch (e) {}
+}
+function notifyReady(o) {
+  ding(); document.title = "✅ Order siap! · SIPS";
+  try { if ("Notification" in window && Notification.permission === "granted") new Notification("Order SIPS anda dah siap!", { body: `#${pad3(o.no)} · Sila ambil di kaunter.`, icon: "icon-192.png" }); } catch (e) {}
+}
+// 5 langkah: penyediaan, pickup dan bayaran adalah status berasingan
+const STEPS = ["Diterima", "Disediakan", "Siap diambil", "Bayaran disahkan", "Diambil"];
 async function startWatch() {
   if (!myOrder) return;
-  try { await customerInit(); unwatch && unwatch(); unwatch = await watchMyOrder(myOrder.id, o => { myOrderData = o; if (!$("#modal").innerHTML) render(); }); } catch (e) { console.error(e); }
+  try {
+    await customerInit(); unwatch && unwatch();
+    unwatch = await watchMyOrder(myOrder.id, o => {
+      if (o && lastSt && lastSt !== "ready" && o.status === "ready") notifyReady(o);
+      lastSt = o?.status || null; myOrderData = o; if (!$("#modal").innerHTML) render();
+    });
+  } catch (e) { console.error(e); }
 }
+setInterval(() => { if (myOrder && myOrderData && !$("#modal").innerHTML) renderMyOrder(); }, 30000);
 function renderMyOrder() {
   const o = myOrderData, st = o?.status || "new";
-  const idx = st === "done" ? 2 : STEPS.findIndex(s => s[0] === st);
-  const msg = { new: "Order anda dah sampai ke kaunter. Staff akan sahkan sekejap lagi.", prep: "Barista sedang sediakan order anda.", ready: "Order anda dah siap! Sila ambil di kaunter.", done: "Terima kasih! Jumpa lagi di SIPS.", cancel: "Order ini dibatalkan oleh outlet. Sila hubungi kaunter." }[st];
+  const collected = st === "collected" || st === "done";
+  const idx = collected ? 4 : st === "ready" ? (o?.paid ? 3 : 2) : st === "prep" ? (o?.paid ? 1 : 1) : 0;
+  const stopped = ["cancel", "void", "noshow"].includes(st);
+  const now = Date.now(), late = o?.eta && ["new", "prep"].includes(st) && now > o.eta;
+  const msg = {
+    new: "Order anda dah sampai ke kaunter. Staff akan sahkan sekejap lagi.",
+    prep: "Barista sedang sediakan order anda.",
+    ready: o?.paid ? "Bayaran disahkan. Sila ambil minuman anda di kaunter." : "Order anda dah siap! Sila ke kaunter untuk bayar dan ambil.",
+    collected: "Terima kasih! Jumpa lagi di SIPS.", done: "Terima kasih! Jumpa lagi di SIPS.",
+    cancel: `Order ini dibatalkan oleh outlet${o?.cancelReason ? ` (${esc(o.cancelReason)})` : ""}. Maaf atas kesulitan.`,
+    void: "Order ini telah di-refund oleh outlet.",
+    noshow: "Order ini ditutup kerana tidak diambil. Hubungi kaunter jika ada masalah.",
+  }[st] || "";
   let extra = "";
-  if (o?.member) extra = o.pointsAwarded ? `<div class="earn big">★ +${o.points} point dah masuk akaun anda</div>` : st !== "cancel" ? `<div class="earn">★ ${pointsFor(o.total)} point akan masuk bila anda ambil order</div>` : "";
-  else if (o && st !== "cancel") extra = `<button class="promo slim" id="joinAfter"><span>Daftar ahli untuk kumpul point pada order akan datang.</span><span class="go">Daftar →</span></button>`;
-  $("#view-menu").innerHTML = `<div class="done">
+  if (o?.member) extra = o.pointsAwarded ? `<div class="earn big">★ +${o.points} point dah masuk akaun anda</div>` : !stopped ? `<div class="earn">★ ${pointsFor(o.total)} point akan masuk bila anda ambil order</div>` : "";
+  else if (o && !stopped) extra = `<button class="promo slim" id="joinAfter"><span>Daftar ahli untuk kumpul point pada order akan datang.</span><span class="go">Daftar →</span></button>`;
+  const etaBox = o?.eta && ["new", "prep"].includes(st)
+    ? `<div class="eta-box ${late ? "late" : ""}">${late ? `Maaf, order anda lewat sedikit. Kami sedang siapkan secepat mungkin.` : `Anggaran siap <b>${new Date(o.eta).toLocaleTimeString("ms-MY", { hour: "2-digit", minute: "2-digit", hour12: false })}</b> · ~${Math.max(1, Math.round((o.eta - now) / 60000))} minit lagi`}${o.delayed ? `<br><small>Masa dikemas kini oleh outlet.</small>` : ""}</div>` : "";
+  $("#view-menu").innerHTML = `<div class="done ${st === "ready" ? "is-ready" : ""}">
     <div style="font-weight:700;color:var(--muted);letter-spacing:.1em;font-size:12px;text-transform:uppercase">No. order anda</div>
     <div class="big num">#${pad3(myOrder.no)}</div>
-    ${o ? `<div style="margin-top:6px;color:var(--muted)">Takeaway · ${esc(o.name)} · ${rm(o.total)}${o.discount ? ` <span class="disc-tag">voucher -${rm(o.discount)}</span>` : ""}</div>` : ""}
-    ${st === "cancel" ? "" : `<div class="steps">${STEPS.map((s, i) => `<div class="${i <= idx ? "on" : ""}">${s[1]}</div>`).join("")}</div>`}
+    ${o ? `<div style="margin-top:6px;color:var(--muted)">Takeaway · ${esc(o.name)} · ${rm(o.total)}${o.discount ? ` <span class="disc-tag">voucher -${rm(o.discount)}</span>` : ""}${o.priceFixed ? ` <span class="disc-tag">harga dikemas kini ikut menu</span>` : ""}</div>` : ""}
+    ${etaBox}
+    ${stopped ? "" : `<ol class="steps5">${STEPS.map((s, i) => `<li class="${i < idx ? "done" : i === idx ? "now" : ""}"><span>${i < idx ? "✓" : i + 1}</span>${s}</li>`).join("")}</ol>`}
     <p style="margin:6px 0 14px">${msg}</p>
     ${extra}
     <button class="btn" id="again" style="margin-top:14px">Buat order baru</button></div>`;
-  $("#again").onclick = () => { unwatch && unwatch(); myOrder = null; myOrderData = null; ls.set("sips.myorder", null); render(); };
+  $("#again").onclick = () => { unwatch && unwatch(); myOrder = null; myOrderData = null; lastSt = null; document.title = "SIPS Order"; ls.set("sips.myorder", null); render(); };
   const ja = $("#joinAfter"); if (ja) ja.onclick = () => openAuth("daftar");
   updateCartBar();
 }

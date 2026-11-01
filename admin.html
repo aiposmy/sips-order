@@ -42,6 +42,7 @@
     <button data-tab="kategori">Kategori &amp; pilihan</button>
     <button data-tab="shift">Shift</button>
     <button data-tab="order">Order</button>
+    <button data-tab="aktiviti">Aktiviti</button>
   </nav>
   <main id="view" class="wrap"></main>
 </div>
@@ -51,7 +52,7 @@
 <script type="module">
 import { OUTLET, PAYMENTS, LOYALTY } from "./config.js";
 import { LIVE, today, staffWatch, staffLogin, staffLogout, watchMenu, buildMenu, saveMenuItem, deleteMenuItem, importDefaultMenu,
-  getCosts, saveCosts, ordersInRange, shiftsInRange } from "./data.js";
+  getCosts, saveCosts, ordersInRange, shiftsInRange, voidOrder, auditInRange, logAudit, watchShift } from "./data.js";
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -103,14 +104,16 @@ const range = { key: "7d", from: addDays(today(), -6), to: today() };
 let rep = null, loadingRep = false, charts = [], sortProd = "sales", orderFilter = { status: "all", source: "all", pay: "all", q: "" };
 
 function setTab(t) {
-  tab = ["laporan", "produk", "kategori", "shift", "order"].includes(t) ? t : "laporan";
+  tab = ["laporan", "produk", "kategori", "shift", "order", "aktiviti"].includes(t) ? t : "laporan";
   try { history.replaceState(null, "", "#" + tab); } catch (e) {}
   document.querySelectorAll("[data-tab]").forEach(b => b.setAttribute("aria-current", b.dataset.tab === tab));
   render();
 }
 document.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => setTab(b.dataset.tab));
 
+let curShift = null;
 function start() {
+  watchShift(s => curShift = s);
   watchMenu(m => { raw = m.raw; menuSource = m.source; if (!$("#modal").innerHTML && (tab === "produk" || tab === "kategori")) render(); });
   getCosts().then(c => { costs = c; if (tab !== "order") render(); }).catch(() => {});
   setTab(tab);
@@ -161,11 +164,15 @@ function catName(i) {
   return p ? (raw.cats.find(c => c.id === p.cat)?.name || "Lain-lain") : "Lain-lain";
 }
 function compute(list, from, to) {
-  const valid = list.filter(o => o.paid && o.status !== "cancel");
+  const valid = list.filter(o => o.paid && !["cancel", "void"].includes(o.status));
   const cancelled = list.filter(o => o.status === "cancel");
-  const pending = list.filter(o => !o.paid && o.status !== "cancel");
+  const voided = list.filter(o => o.status === "void");
+  const noshow = list.filter(o => o.status === "noshow");
+  const pending = list.filter(o => !o.paid && !["cancel", "void", "noshow"].includes(o.status));
   const R = { orders: valid.length, gross: 0, discount: 0, net: 0, items: 0, cost: 0, costKnownSales: 0, costMissing: new Set(),
     cancelled: cancelled.length, cancelledValue: r2(cancelled.reduce((s, o) => s + (o.total || 0), 0)), pending: pending.length,
+    voided: voided.length, refundValue: r2(voided.reduce((s, o) => s + (o.refund?.amount || o.total || 0), 0)), noshow: noshow.length, noshowValue: r2(noshow.reduce((s, o) => s + (o.total || 0), 0)),
+    priceFixed: valid.filter(o => o.priceFixed).length, cancelReasons: cancelled.reduce((m, o) => { const k = o.cancelReason || "Tiada alasan"; m[k] = (m[k] || 0) + 1; return m; }, {}),
     byDay: {}, byHour: Array(24).fill(0).map(() => ({ s: 0, n: 0 })), byDow: Array(7).fill(0).map(() => ({ s: 0, n: 0 })),
     prod: {}, cat: {}, pay: {}, voucher: {}, source: { app: { n: 0, s: 0 }, pos: { n: 0, s: 0 } }, member: { yes: { n: 0, s: 0 }, no: { n: 0, s: 0 } },
     opts: {}, gifts: 0, giftMsgs: {}, points: 0 };
@@ -221,6 +228,7 @@ function render() {
   if (tab === "kategori") return renderCats(v);
   if (tab === "shift") return renderShifts(v);
   if (tab === "order") return renderOrders(v);
+  if (tab === "aktiviti") return renderAudit(v);
 }
 
 const delta = (a, b) => { if (!b) return a ? `<span class="dl up">baru</span>` : ""; const d = (a - b) / Math.abs(b) * 100; return `<span class="dl ${d >= 0 ? "up" : "down"}">${d >= 0 ? "▲" : "▼"} ${Math.abs(d).toFixed(0)}%</span>`; };
@@ -253,10 +261,12 @@ function renderReport(v) {
       ${kpi("Untung kasar", R.costKnownSales ? rm(R.profit) : "—", R.costMissing.size ? "sebahagian kos belum diisi" : "", R.costKnownSales ? delta(R.profit, P.profit) : "")}
       ${kpi("Margin kasar", pct(R.margin), "untung ÷ jualan bersih")}
       ${kpi("Diskaun / voucher", rm(R.discount), `${Object.values(R.voucher).reduce((s, x) => s + x.n, 0)} order guna voucher`)}
-      ${kpi("Order batal", R.cancelled, R.cancelled ? rm(R.cancelledValue) + " nilai" : "")}
+      ${kpi("Batal · tak ambil · refund", `${R.cancelled} · ${R.noshow} · ${R.voided}`, R.voided ? `Refund ${rm(R.refundValue)}` : R.cancelled ? rm(R.cancelledValue) + " nilai batal" : "")}
     </section>
     ${R.costMissing.size ? `<div class="warnbox">Kos belum diisi untuk: <b>${[...R.costMissing].slice(0, 6).map(esc).join(", ")}${R.costMissing.size > 6 ? "…" : ""}</b>. Untung dan margin hanya dikira untuk produk yang ada kos. Isi kos di tab <a href="#produk" data-go="produk">Produk</a>.</div>` : ""}
     ${R.pending ? `<p class="muted">${R.pending} order belum dibayar (masih dalam proses) tidak dikira.</p>` : ""}
+    ${R.priceFixed ? `<div class="warnbox">⚠ ${R.priceFixed} order dihantar dengan harga yang tak sepadan dengan menu dan dibetulkan oleh staff semasa bayaran. Lihat tab <a href="#aktiviti" data-go="aktiviti">Aktiviti</a>.</div>` : ""}
+    ${R.cancelled ? `<p class="muted">Alasan batal: ${Object.entries(R.cancelReasons).map(([k, n]) => `${esc(k)} (${n})`).join(" · ")}</p>` : ""}
 
     <section class="card">
       <div class="card-h"><h2>Jualan harian</h2><span class="muted">${best && best[1].s ? `Hari terbaik: <b>${fmtDay(best[0])}</b> (${rm(best[1].s)})` : ""}</span></div>
@@ -446,7 +456,7 @@ function editProduct(id) {
     $("#pX").onclick = closeModal;
     const pd = $("#pDel"); if (pd) pd.onclick = () => { keep(); confirmDel = true; draw(); };
     const pn = $("#pDelN"); if (pn) pn.onclick = () => { confirmDel = false; draw(); };
-    const py = $("#pDelY"); if (py) py.onclick = async () => { try { await deleteMenuItem("products", id); const cc = { ...costs, products: { ...costs.products } }; delete cc.products[id]; await saveCosts(cc); costs = cc; closeModal(); toast("Produk dipadam."); render(); } catch (e) { err = "Tak berjaya padam."; confirmDel = false; draw(); } };
+    const py = $("#pDelY"); if (py) py.onclick = async () => { try { await deleteMenuItem("products", id); logAudit(me.email, "product_delete", { detail: p0.name }); const cc = { ...costs, products: { ...costs.products } }; delete cc.products[id]; await saveCosts(cc); costs = cc; closeModal(); toast("Produk dipadam."); render(); } catch (e) { err = "Tak berjaya padam."; confirmDel = false; draw(); } };
     $("#pSave").onclick = async () => {
       keep();
       const price = num(p.price), c = cost === "" ? "" : num(cost);
@@ -458,6 +468,8 @@ function editProduct(id) {
       try {
         const body = { name: p.name, desc: p.desc, price, cat: p.cat, color: p.color, img: p.img || "", imgData: p.imgData || "", tags: p.tags, optIds: p.optIds, food: p.food, active: p.active, soldOut: p.soldOut, sort: p.sort };
         const pid = await saveMenuItem("products", id ? { ...body, id } : body);
+        if (!id) logAudit(me.email, "product_add", { detail: `${p.name} · ${rm(price)}` });
+        else if (Number(p0.price) !== price) logAudit(me.email, "price_change", { from: Number(p0.price), to: price, detail: p.name });
         const cc = { ...costs, products: { ...costs.products } };
         if (c === "") delete cc.products[pid]; else cc.products[pid] = c;
         await saveCosts(cc); costs = cc;
@@ -569,11 +581,13 @@ async function renderShifts(v) {
       ${kpi("Jumlah beza tunai", (varSum > 0 ? "+" : varSum < 0 ? "−" : "") + rm(Math.abs(varSum)), closed.filter(x => x.variance).length + " shift ada beza")}
     </section>
     <section class="card"><div class="card-h"><h2>Senarai shift</h2></div>
-    ${table(["Dibuka", "Ditutup", "Staff", "Duit awal", "Order", "CASH", "QR", "Kad", "Jualan", "Tunai dijangka", "Dikira", "Beza", "Catatan"],
+    ${table(["Dibuka", "Ditutup", "Staff", "Duit awal", "Order", "CASH", "QR", "Kad", "Jualan", "Refund tunai", "Tunai dijangka", "Dikira", "Beza", "Pengecualian", "Catatan"],
       L.map(s => [dtm(s.openedAt), s.status === "closed" ? dtm(s.closedAt) : "<b>Masih dibuka</b>", esc(s.staffName || ""), rm(s.openingCash || 0), s.orderCount ?? "—",
-        s.totals ? rm(s.totals.cash) : "—", s.totals ? rm(s.totals.qr) : "—", s.totals ? rm(s.totals.card) : "—", s.sales != null ? rm(s.sales) : "—",
+        s.totals ? rm(s.totals.cash) : "—", s.totals ? rm(s.totals.qr) : "—", s.totals ? rm(s.totals.card) : "—", s.sales != null ? rm(s.sales) : "—", s.refundCash ? rm(s.refundCash) : "—",
         s.expectedCash != null ? rm(s.expectedCash) : "—", s.countedCash != null ? rm(s.countedCash) : "—",
-        s.variance != null ? `<span class="${s.variance < 0 ? "neg" : s.variance > 0 ? "pos" : ""}">${s.variance > 0 ? "+" : s.variance < 0 ? "−" : ""}${rm(Math.abs(s.variance))}</span>` : "—", esc(s.note || "")]))}
+        s.variance != null ? `<span class="${s.variance < 0 ? "neg" : s.variance > 0 ? "pos" : ""}">${s.variance > 0 ? "+" : s.variance < 0 ? "−" : ""}${rm(Math.abs(s.variance))}</span>` : "—",
+        s.exceptions ? [s.exceptions.pending?.length ? `${s.exceptions.pending.length} tergantung` : "", s.exceptions.cancelled?.length ? `${s.exceptions.cancelled.length} batal` : "", s.exceptions.noshow?.length ? `${s.exceptions.noshow.length} tak ambil` : "", s.exceptions.priceFixed?.length ? `${s.exceptions.priceFixed.length} harga` : "", s.exceptions.refunds?.length ? `${s.exceptions.refunds.length} refund` : "", s.exceptions.reprints?.length ? `${s.exceptions.reprints.length} cetak semula` : ""].filter(Boolean).join(", ") || "Tiada" : "—",
+        esc(s.note || "")]))}
     </section>`;
   bindRange(() => { shiftData = null; render(); });
 }
@@ -588,15 +602,15 @@ async function renderOrders(v) {
     if (tab !== "order") return;
   }
   const f = orderFilter, q = f.q.toLowerCase();
-  const stLabel = o => o.status === "cancel" ? "Batal" : o.status === "done" ? "Selesai" : o.paid ? "Dibayar" : "Dalam proses";
-  const L = orderData.filter(o => (f.status === "all" || (f.status === "done" ? o.status === "done" : f.status === "cancel" ? o.status === "cancel" : !["done", "cancel"].includes(o.status)))
+  const stLabel = o => ({ cancel: "Batal", void: "Refund", noshow: "Tak datang ambil", done: "Selesai", collected: "Diambil" }[o.status] || (o.paid ? "Dibayar" : "Dalam proses"));
+  const L = orderData.filter(o => (f.status === "all" || (f.status === "done" ? ["done", "collected"].includes(o.status) : f.status === "cancel" ? ["cancel", "void", "noshow"].includes(o.status) : !["done", "collected", "cancel", "void", "noshow"].includes(o.status)))
     && (f.source === "all" || (f.source === "pos" ? o.source === "pos" : o.source !== "pos"))
     && (f.pay === "all" || o.payment?.method === f.pay)
     && (!q || (o.name || "").toLowerCase().includes(q) || pad3(o.no).includes(q) || (o.items || []).some(i => i.name.toLowerCase().includes(q))))
     .sort((a, b) => b.createdAt - a.createdAt);
   v.innerHTML = rangeBar() + `
     <div class="filters">
-      <label>Status <select id="fSt"><option value="all">Semua</option><option value="done">Selesai</option><option value="open">Dalam proses</option><option value="cancel">Batal</option></select></label>
+      <label>Status <select id="fSt"><option value="all">Semua</option><option value="done">Selesai</option><option value="open">Dalam proses</option><option value="cancel">Batal / refund / tak ambil</option></select></label>
       <label>Sumber <select id="fSrc"><option value="all">Semua</option><option value="app">App</option><option value="pos">Kaunter</option></select></label>
       <label>Bayaran <select id="fPay"><option value="all">Semua</option>${PAYMENTS.map(p => `<option value="${p.id}">${esc(p.label)}</option>`).join("")}</select></label>
       <label class="grow">Cari <input type="search" id="fQ" value="${esc(f.q)}" placeholder="Nama, no. order atau produk"></label>
@@ -628,12 +642,64 @@ function viewOrder(o) {
       <div><span>Diskaun${o.voucherTitle ? " · " + esc(o.voucherTitle) : ""}</span><b class="num">${o.discount ? "-" + rm(o.discount) : "—"}</b></div>
       <div class="hl"><span>Jumlah</span><b class="num">${rm(o.total)}</b></div>
       <div><span>Bayaran</span><b>${o.paid ? esc(PAY[o.payment?.method]?.label || "-") : "Belum bayar"}</b></div>
-      <div><span>Status</span><b>${o.status === "cancel" ? "Batal" : o.status === "done" ? "Selesai" : "Dalam proses"}</b></div>
+      <div><span>Status</span><b>${({ cancel: "Batal", void: "Refund", noshow: "Tak datang ambil", done: "Selesai", collected: "Diambil" })[o.status] || "Dalam proses"}</b></div>
+      ${o.payment?.ref ? `<div><span>Rujukan bayaran</span><b>${esc(o.payment.ref)}</b></div>` : ""}
+      ${o.payment?.verifiedBy ? `<div><span>Disahkan oleh</span><b>${esc(o.payment.verifiedBy)}</b></div>` : ""}
+      ${o.cancelReason ? `<div class="hl red"><span>Dibatalkan oleh ${esc(o.cancelledBy || "")}</span><b>${esc(o.cancelReason)}</b></div>` : ""}
+      ${o.voidReason ? `<div class="hl red"><span>Refund oleh ${esc(o.voidedBy || "")} · ${esc(PAY[o.refund?.method]?.label || "")}</span><b>${esc(o.voidReason)} · ${rm(o.refund?.amount || 0)}</b></div>` : ""}
+      ${o.priceFixed ? `<div><span>Harga dibetulkan</span><b class="num">${rm(o.totalOriginal)} → ${rm(o.total)}</b></div>` : ""}
       ${o.payment?.method === "cash" ? `<div><span>Tunai / baki</span><b class="num">${rm(o.payment.tendered)} / ${rm(o.payment.change)}</b></div>` : ""}
       ${o.pointsAwarded ? `<div><span>Point diberi</span><b class="num">+${o.points}</b></div>` : ""}
     </div>
-    <div class="sheet-foot"><button class="btn wide" id="ovX"><span>Tutup</span><span>✓</span></button></div>`, { wide: true });
+    <div class="sheet-foot">${o.paid && !["void", "cancel"].includes(o.status) ? `<button class="btn ghost" id="ovVoid" style="color:var(--new)">Refund / void</button>` : ""}<button class="btn wide" id="ovX"><span>Tutup</span><span>✓</span></button></div>`, { wide: true });
   $("#ovX").onclick = closeModal;
+  const vb = $("#ovVoid"); if (vb) vb.onclick = () => openVoid(o);
+}
+
+function openVoid(o) {
+  let reason = "", method = o.payment?.method || "cash", err = "", busy = false;
+  const draw = () => {
+    const sh = openModal(`<h2>Refund / void order #${pad3(o.no)}</h2>
+      <div class="sub">${esc(o.name || "—")} · dibayar ${rm(o.total)} (${esc(PAY[o.payment?.method]?.label || "")})</div>
+      <div class="warnbox">Order <b>tidak dipadam</b>. Ia ditanda "Refund" dan direkod dalam Aktiviti bersama nama admin, alasan dan masa. ${o.pointsAwarded ? `Point ahli (${o.points}) akan ditolak semula. ` : ""}${o.voucherId ? "Voucher dipulangkan kepada ahli." : ""}</div>
+      <div class="opt"><label class="t">Cara refund</label><div class="seg">${PAYMENTS.map(p => `<button data-m="${p.id}" aria-pressed="${method === p.id}">${esc(p.label)}</button>`).join("")}</div></div>
+      <label class="field"><span>Alasan (wajib)</span><input type="text" id="vR" maxlength="120" value="${esc(reason)}" placeholder="Cth: minuman tumpah, pelanggan tak puas hati"></label>
+      ${method === "cash" ? `<p class="muted">Refund tunai ${curShift?.open ? "akan ditolak daripada tunai dijangka shift semasa." : "direkod tanpa shift (tiada shift dibuka)."}</p>` : ""}
+      ${err ? `<div class="err">${esc(err)}</div>` : ""}
+      <div class="sheet-foot"><button class="btn ghost" id="vX">Batal</button><button class="btn" style="background:var(--new);color:#fff" id="vOk" ${busy ? "disabled" : ""}>${busy ? "Memproses…" : `Sahkan refund ${rm(o.total)}`}</button></div>`);
+    sh.querySelectorAll("[data-m]").forEach(b => b.onclick = () => { reason = $("#vR").value; method = b.dataset.m; draw(); });
+    $("#vX").onclick = () => viewOrder(o);
+    $("#vOk").onclick = async () => {
+      reason = $("#vR").value.trim();
+      if (reason.length < 3) { err = "Sila tulis alasan refund."; draw(); return; }
+      busy = true; draw();
+      try { await voidOrder(o, { reason, method, by: me.email, shiftId: curShift?.open && method === "cash" ? curShift.shiftId : (curShift?.open ? curShift.shiftId : "") }); orderData = null; rep = null; closeModal(); toast(`Order #${pad3(o.no)} di-refund.`); render(); }
+      catch (e) { console.error(e); busy = false; err = "Tak berjaya refund. Pastikan akaun admin dan rules terkini."; draw(); }
+    };
+  };
+  draw();
+}
+
+/* ================= AKTIVITI (AUDIT LOG) ================= */
+const ACT = { cancel: "Batal order", void_refund: "Refund / void", noshow: "Tak datang ambil", price_fix: "Harga dibetulkan", reprint: "Cetak sticker semula",
+  shift_open: "Buka shift", shift_close: "Tutup shift", stock_out: "Tanda stok habis", stock_in: "Stok ada semula", pause_orders: "Jeda order app", resume_orders: "Buka order app",
+  price_change: "Tukar harga produk", product_delete: "Padam produk", product_add: "Tambah produk" };
+let auditData = null, auditKey = "", auditFilter = "all";
+async function renderAudit(v) {
+  const fromTs = parseYmd(range.from).getTime(), toTs = parseYmd(range.to).getTime() + 864e5 - 1, key = fromTs + "-" + toTs;
+  if (!auditData || auditKey !== key) {
+    v.innerHTML = rangeBar() + `<p class="muted pad">Memuatkan aktiviti…</p>`; bindRange(render);
+    try { auditData = await auditInRange(fromTs, toTs); auditKey = key; } catch (e) { v.innerHTML = rangeBar() + `<div class="err pad">Tak dapat ambil aktiviti. Pastikan rules terkini dah Publish.</div>`; bindRange(render); return; }
+    if (tab !== "aktiviti") return;
+  }
+  const counts = auditData.reduce((m, a) => (m[a.action] = (m[a.action] || 0) + 1, m), {});
+  const L = auditData.filter(a => auditFilter === "all" || a.action === auditFilter);
+  v.innerHTML = rangeBar() + `
+    <p class="muted">Semua tindakan sensitif direkod secara automatik dan <b>tidak boleh diubah atau dipadam</b>, termasuk oleh admin.</p>
+    <div class="chips wrapchips"><button data-af="all" aria-pressed="${auditFilter === "all"}">Semua (${auditData.length})</button>${Object.entries(counts).map(([k, n]) => `<button data-af="${k}" aria-pressed="${auditFilter === k}">${esc(ACT[k] || k)} (${n})</button>`).join("")}</div>
+    ${table(["Masa", "Tindakan", "Order", "Jumlah", "Butiran", "Oleh"], L.slice(0, 500).map(a => [dtm(a.at), `<b>${esc(ACT[a.action] || a.action)}</b>`, a.no ? `#${pad3(a.no)}` : "", a.amount != null ? rm(a.amount) : a.from != null ? `${rm(a.from)} → ${rm(a.to)}` : "", esc(a.detail || ""), esc(a.by || "")]))}`;
+  bindRange(render);
+  document.querySelectorAll("[data-af]").forEach(b => b.onclick = () => { auditFilter = b.dataset.af; render(); });
 }
 
 staffWatch((staff, reason) => {

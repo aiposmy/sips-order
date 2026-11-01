@@ -1,24 +1,114 @@
 rules_version = '2';
 // SIPS Order — peraturan keselamatan Firestore
-// Customer : boleh HANTAR order & baca order SENDIRI sahaja.
-// Staff    : (emel ada dalam koleksi "staff") boleh baca & urus semua order.
+// Customer tetamu : boleh HANTAR order & baca order SENDIRI sahaja.
+// Ahli            : sama seperti tetamu + baca profil/point/voucher sendiri,
+//                   guna voucher sendiri, tukar point dengan voucher.
+//                   Ahli TAK BOLEH tambah point sendiri — hanya staff.
+// Staff           : (emel ada dalam koleksi "staff") urus semua order & beri point.
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // ---------- PROGRAM AHLI (mesti sama dengan LOYALTY dalam config.js) ----------
+    function welcomeValue() { return 2; }
+    function welcomeMin()   { return 8; }
+    function rewardCost(r)  { return {'r5': 50, 'r10': 90}.get(r, 999999); }
+    function rewardValue(r) { return {'r5': 5,  'r10': 10}.get(r, -1); }
+    // ------------------------------------------------------------------------------
+
     function signedIn() { return request.auth != null; }
+    function isMemberUser() {
+      return signedIn() && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
     function isStaff() {
       return signedIn()
         && request.auth.token.email != null
         && exists(/databases/$(database)/documents/staff/$(request.auth.token.email));
     }
+    // Admin = staff dengan field role == "admin" (laporan & urus produk)
+    function isAdmin() {
+      return isStaff() && get(/databases/$(database)/documents/staff/$(request.auth.token.email)).data.get('role', 'staff') == 'admin';
+    }
+    function memberPath(uid) { return /databases/$(database)/documents/members/$(uid); }
+    function voucherPath(uid, vid) { return /databases/$(database)/documents/members/$(uid)/vouchers/$(vid); }
+
+    // Voucher yang dipakai pada order ini mesti milik pengguna, baru ditanda "used"
+    // untuk order ini, dan diskaun sama dengan nilai voucher.
+    function voucherOk(orderId) {
+      let d = request.resource.data;
+      let v = getAfter(voucherPath(request.auth.uid, d.voucherId)).data;
+      return isMemberUser()
+        && v.status == 'used'
+        && v.usedOrder == orderId
+        && d.discount == v.value
+        && d.subtotal >= v.min;
+    }
+
+    // Shift outlet mesti dibuka sebelum order boleh dibuat
+    function shiftDoc() { return get(/databases/$(database)/documents/meta/shift).data; }
+    function shiftOpen() { return exists(/databases/$(database)/documents/meta/shift) && shiftDoc().open == true; }
+    function counterOk() { return request.resource.data.no == getAfter(/databases/$(database)/documents/meta/counter).data.n; }
+
+    // Order manual di kaunter (staff sahaja, mesti dalam shift yang dibuka)
+    function posCreateOk() {
+      let d = request.resource.data;
+      return isStaff()
+        && d.source == 'pos'
+        && shiftOpen()
+        && d.shiftId == shiftDoc().shiftId
+        && d.paid == true
+        && d.payment.method in ['cash', 'qr', 'card']
+        && d.member == false
+        && d.discount == 0
+        && d.voucherId == ''
+        && d.items is list && d.items.size() > 0 && d.items.size() <= 60
+        && counterOk();
+    }
+
+    // Order app hanya diterima bila order app tak dijeda dan giliran belum penuh
+    function queueOpen() {
+      return !exists(/databases/$(database)/documents/meta/queue)
+        || (get(/databases/$(database)/documents/meta/queue).data.get('paused', false) != true
+            && get(/databases/$(database)/documents/meta/queue).data.get('orders', 0) < get(/databases/$(database)/documents/meta/queue).data.get('max', 15));
+    }
+
+    // Staff hanya boleh:
+    //  - tukar status penyediaan (new/prep/ready/collected), ETA, kiraan cetak
+    //  - rekod bayaran SEKALI (order belum dibayar), QR/Kad wajib no. rujukan
+    //  - batal order BELUM dibayar dengan alasan, atau tanda tak datang ambil
+    // Staff TIDAK boleh ubah item/harga asal, ubah bayaran yang dah direkod, atau batal/void order yang dah dibayar.
+    function staffOrderUpdateOk() {
+      let b = resource.data;
+      let a = request.resource.data;
+      let ch = a.diff(b).affectedKeys();
+      return isStaff()
+        && !ch.hasAny(['items', 'subtotal', 'discount', 'voucherId', 'uid', 'no', 'day', 'source', 'createdAt', 'member', 'refund', 'voidReason', 'voidedBy', 'voidAt'])
+        && a.status in ['new', 'prep', 'ready', 'collected', 'done', 'cancel', 'noshow']
+        && (b.get('paid', false) == false
+            ? ((a.status != 'cancel' || (a.get('cancelReason', '') is string && a.get('cancelReason', '').size() >= 3))
+               && (a.get('paid', false) == false
+                   || (a.payStatus == 'paid'
+                       && a.payment.method in ['cash', 'qr', 'card']
+                       && (a.payment.method == 'cash' || a.payment.get('ref', '').size() >= 4))))
+            : (!ch.hasAny(['paid', 'payment', 'paidAt', 'shiftId', 'total', 'payStatus', 'totalOriginal', 'priceFixed'])
+               && !(a.status in ['cancel', 'noshow'])));
+    }
 
     match /orders/{orderId} {
-      allow create: if signedIn()
+      allow create: if posCreateOk() || (signedIn()
+        && request.resource.data.source == 'app'
+        && request.resource.data.paid == false
+        && shiftOpen()
+        && queueOpen()
         && request.resource.data.uid == request.auth.uid
+        && request.resource.data.member == isMemberUser()
         && request.resource.data.status == 'new'
         && request.resource.data.printed == 0
+        && request.resource.data.pointsAwarded == false
         && request.resource.data.ts == request.time
-        && request.resource.data.total is number
+        && request.resource.data.subtotal is number
+        && request.resource.data.discount is number
+        && request.resource.data.total == request.resource.data.subtotal - request.resource.data.discount
+        && request.resource.data.total >= 0
         && request.resource.data.items is list
         && request.resource.data.items.size() > 0
         && request.resource.data.items.size() <= 40
@@ -26,14 +116,17 @@ service cloud.firestore {
         && request.resource.data.name is string
         && request.resource.data.name.size() > 0
         && request.resource.data.name.size() <= 30
-        && request.resource.data.no == getAfter(/databases/$(database)/documents/meta/counter).data.n;
+        && request.resource.data.no == getAfter(/databases/$(database)/documents/meta/counter).data.n
+        && ((request.resource.data.voucherId == '' && request.resource.data.discount == 0) || voucherOk(orderId)));
 
       // Customer baca order sendiri sahaja; staff baca semua
       allow get: if isStaff() || (signedIn() && resource.data.uid == request.auth.uid);
-      allow list: if isStaff();
+      allow list: if isStaff() || (signedIn() && resource.data.uid == request.auth.uid);
 
-      // Hanya staff boleh tukar status / padam
-      allow update, delete: if isStaff();
+      // Admin: boleh kemas kini (termasuk refund/void). Staff: terhad (lihat staffOrderUpdateOk).
+      allow update: if isAdmin() || staffOrderUpdateOk();
+      // ORDER JUALAN TIDAK BOLEH DIPADAM OLEH SESIAPA. Guna status Batal / Refund.
+      allow delete: if false;
     }
 
     // Nombor giliran harian — hanya boleh naik 1, atau reset ke 1 bila hari bertukar
@@ -45,6 +138,108 @@ service cloud.firestore {
         || (request.resource.data.day != resource.data.day && request.resource.data.n == 1)
         || isStaff()
       );
+    }
+
+    // Giliran: bilangan order aktif, kapasiti, jeda order app
+    match /meta/queue {
+      allow read: if signedIn();
+      allow write: if isStaff();
+    }
+    // Audit log: staff/admin boleh TAMBAH sahaja. Tiada sesiapa boleh ubah atau padam.
+    match /audit/{id} {
+      allow create: if isStaff() && request.resource.data.at is number && request.resource.data.action is string;
+      allow read: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    // Status shift semasa (semua boleh baca supaya page pelanggan tahu outlet buka/tutup)
+    match /meta/shift {
+      allow read: if signedIn();
+      allow write: if isStaff();
+    }
+    // Rekod & laporan shift (staff sahaja)
+    match /shifts/{shiftId} {
+      allow read, create, update: if isStaff();
+      allow delete: if false;
+    }
+
+    // Menu: semua boleh baca; hanya admin boleh ubah.
+    // Staff boleh tanda stok habis / ada (field soldOut sahaja).
+    match /products/{pid} {
+      allow read: if true;
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin()
+        || (isStaff() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['soldOut'])
+            && request.resource.data.soldOut is bool);
+    }
+    match /categories/{cid} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    match /optionGroups/{gid} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    // Kos produk (rahsia perniagaan) — admin sahaja
+    match /meta/costs {
+      allow read, write: if isAdmin();
+    }
+
+    // Profil ahli
+    match /members/{uid} {
+      allow read: if isStaff() || (signedIn() && request.auth.uid == uid);
+
+      allow create: if isMemberUser() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['name', 'phone', 'email', 'points', 'lifetime', 'createdAt', 'lastRedeem'])
+        && request.resource.data.points == 0
+        && request.resource.data.lifetime == 0
+        && request.resource.data.lastRedeem == '';
+
+      allow update: if isStaff()
+        || (isMemberUser() && request.auth.uid == uid && (
+              // tukar nama / no. telefon
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'phone'])
+              // tolak point untuk tebus voucher baru
+              || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['points', 'lastRedeem'])
+                  && !exists(voucherPath(uid, request.resource.data.lastRedeem))
+                  && getAfter(voucherPath(uid, request.resource.data.lastRedeem)).data.source == 'redeem'
+                  && request.resource.data.points == resource.data.points
+                       - rewardCost(getAfter(voucherPath(uid, request.resource.data.lastRedeem)).data.reward)
+                  && request.resource.data.points >= 0)
+           ));
+
+      // Voucher ahli
+      match /vouchers/{vid} {
+        allow read: if isStaff() || (signedIn() && request.auth.uid == uid);
+
+        allow create: if isStaff()
+          || (isMemberUser() && request.auth.uid == uid
+              && request.resource.data.status == 'active'
+              && (
+                // voucher selamat datang — sekali sahaja (ID tetap "welcome")
+                (vid == 'welcome'
+                  && request.resource.data.source == 'welcome'
+                  && request.resource.data.value == welcomeValue()
+                  && request.resource.data.min == welcomeMin()
+                  && existsAfter(memberPath(uid)))
+                // voucher tebus point
+                || (request.resource.data.source == 'redeem'
+                  && request.resource.data.value == rewardValue(request.resource.data.reward)
+                  && request.resource.data.min == request.resource.data.value
+                  && getAfter(memberPath(uid)).data.lastRedeem == vid
+                  && getAfter(memberPath(uid)).data.points == get(memberPath(uid)).data.points - rewardCost(request.resource.data.reward))
+              ));
+
+        // Ahli hanya boleh tanda voucher "used" untuk order sendiri
+        allow update: if isStaff()
+          || (isMemberUser() && request.auth.uid == uid
+              && resource.data.status == 'active'
+              && request.resource.data.status == 'used'
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'usedOrder', 'usedAt'])
+              && getAfter(/databases/$(database)/documents/orders/$(request.resource.data.usedOrder)).data.uid == request.auth.uid);
+
+        allow delete: if isAdmin();
+      }
     }
 
     // Senarai staff — diurus dari Firebase Console sahaja

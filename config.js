@@ -41,6 +41,14 @@ export const PAYMENTS = [
   { id: "card", label: "Kad Debit / Kredit", short: "KAD" },
 ];
 
+// Giliran & anggaran siap
+//  baseMin    : masa asas setiap order (minit)
+//  perCupMin  : masa tambahan untuk setiap cawan dalam giliran
+//  baristas   : bilangan staff yang menyediakan minuman serentak
+//  maxActive  : had order app aktif (Baru + Disediakan). Bila penuh, pelanggan diminta cuba sebentar lagi.
+//  pickupMin  : selepas siap, berapa minit sebelum staff boleh tanda "Tak datang ambil"
+export const QUEUE = { baseMin: 5, perCupMin: 2, baristas: 1, maxActive: 15, pickupMin: 30 };
+
 // Saiz sticker (mm). Saiz biasa untuk cawan: 40x30, 50x30, 58x40.
 // food:false -> tak cetak sticker untuk makanan.
 export const LABEL = { width: 50, height: 30, food: true };

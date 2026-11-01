@@ -38,8 +38,8 @@
 <div id="printArea" aria-hidden="true"></div>
 
 <script type="module">
-import { OUTLET, PAYMENTS, LABEL, GIFT } from "./config.js";
-import { LIVE, today, pointsFor, staffWatch, staffLogin, staffLogout, watchOrders, updateOrder, deleteOrder, completeOrder, cancelOrder,
+import { OUTLET, PAYMENTS, LABEL, GIFT, QUEUE } from "./config.js";
+import { LIVE, today, pointsFor, staffWatch, staffLogin, staffLogout, watchOrders, updateOrder, payOrder, collectOrder, cancelOrder, markNoShow, delayOrder, logAudit, watchQueue, setQueue, getMemberFlags,
   watchMenu, buildMenu, setSoldOut, watchShift, openShift, closeShift, shiftSummary, listShifts, createPosOrder } from "./data.js";
 
 const $ = s => document.querySelector(s);
@@ -86,7 +86,11 @@ $("#loginForm").addEventListener("submit", async e => {
 });
 
 /* ---------- STATE ---------- */
-let orders = [], seen = null, sound = false, autoPrint = ls.get("sips.autoprint", false), audioCtx = null, histOpen = false, confirmClear = false, day = today(), unsub = null;
+let orders = [], seen = null, sound = false, autoPrint = ls.get("sips.printer", false), audioCtx = null, histOpen = false, day = today(), unsub = null;
+let queueState = null, lastQ = "", memberFlags = {}, online = navigator.onLine;
+const by = () => `${shift?.staffName || "-"} (${staffEmail})`;
+window.addEventListener("online", () => { online = true; if (!$("#modal").innerHTML) render(); });
+window.addEventListener("offline", () => { online = false; if (!$("#modal").innerHTML) render(); else toast("Tiada sambungan internet."); });
 let shift = null, shiftOpenForm = { name: ls.get("sips.staffname", ""), cash: "" }, shiftHist = null;
 const isOpen = () => !!(shift && shift.open);
 
@@ -113,13 +117,26 @@ async function subscribe() {
     seen = new Set(list.map(o => o.id)); orders = list;
     if (fresh.length) {
       chime(); toast(`Order baru #${pad3(fresh[0].no)} masuk`);
-      if (autoPrint && isOpen()) fresh.sort((a, b) => a.createdAt - b.createdAt).forEach(o => queueLabels(o, true));
+      // Hanya peranti pencetak yang cetak automatik, dan hanya jika belum pernah dicetak
+      if (autoPrint && isOpen()) fresh.filter(o => !o.printed).sort((a, b) => a.createdAt - b.createdAt).forEach(o => queueLabels(o, true));
     }
+    list.filter(o => o.member && memberFlags[o.uid] == null).forEach(o => { memberFlags[o.uid] = 0; getMemberFlags(o.uid).then(f => { memberFlags[o.uid] = f.noShows; if (f.noShows && !$("#modal").innerHTML) render(); }); });
+    syncQueue();
     if (!$("#modal").innerHTML) render(); else render.pending = true;
   });
 }
+// Kemas kini bilangan giliran untuk page pelanggan (kapasiti & anggaran siap)
+function syncQueue() {
+  if (!isOpen()) return;
+  const act = orders.filter(o => o.source !== "pos" && ["new", "prep"].includes(o.status));
+  const cups = orders.filter(o => ["new", "prep"].includes(o.status)).reduce((s, o) => s + o.items.reduce((a, i) => a + (i.food ? 0 : i.qty), 0), 0);
+  const key = act.length + "|" + cups;
+  if (key === lastQ) return; lastQ = key;
+  setQueue({ orders: act.length, cups, max: QUEUE.maxActive }).catch(() => { lastQ = ""; });
+}
 function start() {
   keepAwake(); subscribe();
+  watchQueue(q => { queueState = q; if (!$("#modal").innerHTML) render(); });
   watchShift(s => { shift = s; if (!$("#modal").innerHTML) render(); else render.pending = true; });
   setInterval(() => { if (today() !== day) { day = today(); subscribe(); } else if (!$("#modal").innerHTML) render(); }, 30000);
 }
@@ -152,20 +169,23 @@ function render() {
   const by = s => orders.filter(o => o.status === s).sort((a, b) => a.createdAt - b.createdAt);
   const nNew = by("new").length;
   document.title = nNew ? `(${nNew}) SIPS Outlet` : "SIPS Outlet";
-  const paid = orders.filter(o => o.paid && o.status !== "cancel");
+  const paid = orders.filter(o => o.paid && !["cancel", "void"].includes(o.status));
   const sales = paid.reduce((s, o) => s + o.total, 0);
   const lane = (s, title, emptyMsg) => { const L = by(s); return `<section class="lane"><h2 style="color:var(--${s})">${title}<span class="c num">${L.length}</span></h2>${L.length ? L.map(ticket).join("") : `<div class="empty">${emptyMsg}</div>`}</section>`; };
-  const done = orders.filter(o => o.status === "done" || o.status === "cancel").sort((a, b) => b.createdAt - a.createdAt);
+  const done = orders.filter(o => ["done", "collected", "cancel", "void", "noshow"].includes(o.status)).sort((a, b) => b.createdAt - a.createdAt);
   const base = location.href.replace(/outlet\.html.*$/, "");
   $("#view-outlet").innerHTML = `
+    ${online ? "" : `<div class="offline">⚠ Tiada sambungan internet. Order baru dan bayaran tak dapat disimpan sehingga internet pulih. Jangan muat semula page.</div>`}
     ${shiftBar()}
     <div class="toolbar"><h1>${esc(OUTLET.branch)}</h1>
+      ${isOpen() ? `<button class="tgl ${queueState?.paused ? "warn" : ""}" id="tPause" aria-pressed="${!queueState?.paused}"><i></i>Order app: ${queueState?.paused ? "DIJEDA" : "DIBUKA"}</button>` : ""}
       <button class="tgl" id="tSound" aria-pressed="${sound}"><i></i>Bunyi alert ${sound ? "ON" : "OFF"}</button>
-      <button class="tgl" id="tAuto" aria-pressed="${autoPrint}"><i></i>Auto print sticker ${autoPrint ? "ON" : "OFF"}</button></div>
+      <button class="tgl" id="tAuto" aria-pressed="${autoPrint}" title="Hidupkan pada SATU peranti sahaja supaya sticker tak dicetak dua kali"><i></i>Peranti pencetak ${autoPrint ? "ON" : "OFF"}</button></div>
+    ${isOpen() && queueState ? `<p class="qline muted">Giliran app: <b class="num">${queueState.orders || 0}/${queueState.max || QUEUE.maxActive}</b> order aktif · <b class="num">${queueState.cups || 0}</b> cawan · anggaran order baru ~<b class="num">${Math.round(QUEUE.baseMin + (queueState.cups || 0) * QUEUE.perCupMin / Math.max(1, QUEUE.baristas))}</b> min${(queueState.orders || 0) >= (queueState.max || QUEUE.maxActive) ? ` · <b style="color:var(--new)">PENUH: pelanggan diminta cuba sebentar lagi</b>` : ""}</p>` : ""}
     <div class="stats">
       <div class="stat"><b class="num" style="color:var(--new)">${nNew}</b><span>Order baru</span></div>
       <div class="stat"><b class="num">${by("prep").length}</b><span>Sedang disediakan</span></div>
-      <div class="stat"><b class="num">${orders.filter(o => o.status !== "cancel").length}</b><span>Order hari ini</span></div>
+      <div class="stat"><b class="num">${orders.filter(o => !["cancel", "void", "noshow"].includes(o.status)).length}</b><span>Order hari ini</span></div>
       <div class="stat"><b class="num">${rm(sales)}</b><span>Bayaran diterima hari ini</span></div></div>
     <div class="lanes ${isOpen() ? "" : "locked"}">
       ${lane("new", "Baru", "Tiada order baru. Order pelanggan akan muncul di sini dengan bunyi alert.")}
@@ -174,9 +194,9 @@ function render() {
     </div>
     <details class="hist" id="hist" ${histOpen ? "open" : ""}><summary>Selesai &amp; batal hari ini (${done.length})</summary>
       <div class="htable">${done.length ? `<table><thead><tr><th>No</th><th>Masa</th><th>Nama</th><th>Sumber</th><th>Item</th><th>Jumlah</th><th>Bayaran</th><th>Point</th><th>Status</th></tr></thead><tbody>
-      ${done.map(o => `<tr><td class="num">#${pad3(o.no)}</td><td class="num">${tm(o.createdAt)}</td><td>${esc(o.name || "-")}</td><td>${o.source === "pos" ? "Kaunter" : "App"}</td><td>${o.items.reduce((s, i) => s + i.qty, 0)}</td><td class="num">${rm(o.total)}${o.discount ? ` <small>(-${rm(o.discount)})</small>` : ""}</td><td>${o.paid ? esc(PAY[o.payment?.method]?.short || "-") : "-"}</td><td class="num">${o.pointsAwarded ? "+" + o.points : o.member ? "-" : ""}</td><td>${o.status === "done" ? "Selesai" : "Batal"}</td></tr>`).join("")}
+      ${done.map(o => `<tr><td class="num">#${pad3(o.no)}</td><td class="num">${tm(o.createdAt)}</td><td>${esc(o.name || "-")}</td><td>${o.source === "pos" ? "Kaunter" : "App"}</td><td>${o.items.reduce((s, i) => s + i.qty, 0)}</td><td class="num">${rm(o.total)}${o.discount ? ` <small>(-${rm(o.discount)})</small>` : ""}</td><td>${o.paid ? esc(PAY[o.payment?.method]?.short || "-") : "-"}</td><td class="num">${o.pointsAwarded ? "+" + o.points : o.member ? "-" : ""}</td><td>${ST[o.status] || o.status}${o.cancelReason ? `<br><small class="muted">${esc(o.cancelReason)}</small>` : ""}${o.voidReason ? `<br><small class="muted">Refund: ${esc(o.voidReason)}</small>` : ""}</td></tr>`).join("")}
       </tbody></table>` : `<p style="color:var(--muted)">Belum ada.</p>`}</div>
-      <div class="danger">${confirmClear ? `<span>Padam semua order hari ini? Tak boleh undo.</span><button class="btn" style="background:var(--new);color:#fff" id="clrYes">Ya, padam</button><button class="btn ghost" id="clrNo">Batal</button>` : `<button class="btn ghost" id="clr">Kosongkan order hari ini</button>`}</div>
+      <p class="muted">Rekod jualan tidak boleh dipadam. Order yang belum dibayar boleh dibatalkan dengan alasan. Order yang dah dibayar hanya boleh di-refund oleh admin.</p>
     </details>
     <details class="hist" id="stock" ${stockOpen ? "open" : ""}><summary>Stok menu ${MENU.reduce((n, c) => n + c.items.filter(i => i.soldOut).length, 0) ? `<span class="pill unpaid">${MENU.reduce((n, c) => n + c.items.filter(i => i.soldOut).length, 0)} habis</span>` : ""}</summary>
       <p class="muted">Tekan untuk tanda item <b>habis</b>. Item yang habis tak boleh dipesan oleh pelanggan dan dalam order manual, sehingga ditanda <b>ada</b> semula.${menuSource === "config" ? " <br><b>Nota:</b> menu masih guna contoh dari config.js. Buka page admin dan tekan “Salin menu ke Firebase” supaya stok boleh diubah." : ""}</p>
@@ -194,15 +214,13 @@ function bindDash() {
   $("#stock").ontoggle = () => stockOpen = $("#stock").open;
   document.querySelectorAll("[data-so]").forEach(b => b.onclick = async () => {
     const it = ITEM[b.dataset.so]; if (!it) return; b.disabled = true;
-    try { await setSoldOut(it.id, !it.soldOut); toast(it.soldOut ? `${it.name} ada semula.` : `${it.name} ditanda habis.`); }
+    try { await setSoldOut(it.id, !it.soldOut); logAudit(by(), it.soldOut ? "stock_in" : "stock_out", { detail: it.name }); toast(it.soldOut ? `${it.name} ada semula.` : `${it.name} ditanda habis.`); }
     catch (e) { toast("Tak berjaya kemaskini stok."); b.disabled = false; }
   });
   $("#shHist").ontoggle = async () => { if ($("#shHist").open) { shiftHist = await listShifts(10).catch(() => []); paintShiftHist(); } };
   $("#tSound").onclick = () => { sound = !sound; chime(); render(); };
-  $("#tAuto").onclick = () => { autoPrint = !autoPrint; ls.set("sips.autoprint", autoPrint); render(); };
-  const c = $("#clr"); if (c) c.onclick = () => { confirmClear = true; histOpen = true; render(); };
-  const n = $("#clrNo"); if (n) n.onclick = () => { confirmClear = false; render(); };
-  const y = $("#clrYes"); if (y) y.onclick = async () => { confirmClear = false; for (const o of [...orders]) await deleteOrder(o.id).catch(() => {}); toast("Order hari ini dikosongkan"); };
+  $("#tAuto").onclick = () => { autoPrint = !autoPrint; ls.set("sips.printer", autoPrint); toast(autoPrint ? "Peranti ini akan cetak sticker secara automatik. Pastikan peranti lain OFF." : "Cetak automatik dimatikan pada peranti ini."); render(); };
+  const tp = $("#tPause"); if (tp) tp.onclick = async () => { const p = !queueState?.paused; try { await setQueue({ paused: p }); logAudit(by(), p ? "pause_orders" : "resume_orders", {}); toast(p ? "Order dari app dijeda. Pelanggan diberitahu outlet sibuk." : "Order dari app dibuka semula."); } catch (e) { toast("Tak berjaya tukar status order app."); } };
   $("#cp").onclick = async () => { try { await navigator.clipboard.writeText($("#lnk").textContent); toast("Link disalin"); } catch (e) { toast("Tekan lama pada link untuk salin."); } };
   document.querySelectorAll("[data-act]").forEach(b => b.onclick = () => act(b.dataset.id, b.dataset.act));
   // shift
@@ -230,57 +248,124 @@ function paintShiftHist() {
     </tbody></table></div>` : `<p class="muted">Belum ada shift.</p>`;
 }
 
+const ST = { new: "Baru", prep: "Disediakan", ready: "Siap diambil", done: "Selesai", collected: "Diambil", cancel: "Batal", void: "Refund", noshow: "Tak datang ambil" };
+// Kira semula harga berdasarkan menu Firebase (sumber yang hanya admin boleh ubah)
+function priceCheck(o) {
+  if (o.source === "pos" || !Object.keys(ITEM).length) return { ok: true, total: o.total };
+  let sum = 0; const issues = [];
+  for (const i of o.items) {
+    const p = ITEM[i.pid] || Object.values(ITEM).find(x => x.name === i.name);
+    if (!p) { issues.push(`${i.name}: tiada dalam menu`); sum += i.unit * i.qty; continue; }
+    let u = p.price;
+    for (const op of i.opts || []) for (const g of p.opts) { const c = g.choices.find(c => c.n === op); if (c) { u += c.p || 0; break; } }
+    u = r2(u);
+    if (Math.abs(u - i.unit) > 0.001) issues.push(`${i.name}: ${rm(i.unit)} → ${rm(u)}`);
+    sum += u * i.qty;
+  }
+  const sub = r2(sum), total = r2(Math.max(0, sub - (o.discount || 0)));
+  return { ok: !issues.length && Math.abs(total - o.total) < 0.001, total, sub, issues };
+}
 function ticket(o) {
-  const L = !isOpen() ? "disabled" : "";
-  const payBtn = o.paid ? `<button class="go" data-act="done" data-id="${o.id}" ${L}>Dah diambil</button>` : `<button class="go" data-act="pay" data-id="${o.id}" ${L}>Terima bayaran</button>`;
+  const L = !isOpen() || !online ? "disabled" : "";
+  const pc = o.paid ? { ok: true } : priceCheck(o);
+  const now = Date.now(), late = o.eta && ["new", "prep"].includes(o.status) && now > o.eta;
+  const waitMin = o.readyAt ? Math.floor((now - o.readyAt) / 60000) : 0;
+  const cancelBtn = !o.paid ? `<button class="x" data-act="cancel" data-id="${o.id}" ${L}>Batal</button>` : "";
+  const payBtn = !o.paid ? `<button class="${o.status === "ready" ? "go" : ""}" data-act="pay" data-id="${o.id}" ${L}>Terima bayaran</button>` : "";
   const btns = {
-    new: `<button class="x" data-act="cancel" data-id="${o.id}" ${L}>Batal</button><button data-act="labels" data-id="${o.id}">Sticker</button><button class="go" data-act="accept" data-id="${o.id}" ${L}>Terima &amp; print</button>`,
-    prep: `<button data-act="labels" data-id="${o.id}">Print semula</button><button class="go" data-act="ready" data-id="${o.id}" ${L}>Siap</button>`,
-    ready: `<button data-act="back" data-id="${o.id}" ${L}>Undur</button>${payBtn}`
+    new: `${cancelBtn}<button data-act="labels" data-id="${o.id}">Sticker</button><button class="go" data-act="accept" data-id="${o.id}" ${L}>Terima &amp; print</button>`,
+    prep: `${cancelBtn}<button data-act="labels" data-id="${o.id}">Sticker</button>${payBtn}<button class="go" data-act="ready" data-id="${o.id}" ${L}>Siap</button>`,
+    ready: `<button data-act="back" data-id="${o.id}" ${L}>Undur</button>${!o.paid && waitMin >= QUEUE.pickupMin ? `<button class="x" data-act="noshow" data-id="${o.id}" ${L}>Tak datang</button>` : ""}${o.paid ? `<button class="go" data-act="collect" data-id="${o.id}" ${L}>Serah kepada pelanggan</button>` : payBtn}`
   }[o.status] || "";
   const gifts = o.items.filter(i => i.gift && i.gift.msg).length;
-  return `<article class="ticket s-${o.status}">
-    <div class="hd"><span class="no num">#${pad3(o.no)}</span><span class="pill ${o.source === "pos" ? "pos" : o.type}">${o.source === "pos" ? "Kaunter" : "App · Takeaway"}</span>${o.member ? `<span class="pill mem">★ Ahli</span>` : ""}${o.paid ? `<span class="pill paid">✓ ${esc(PAY[o.payment?.method]?.short || "Dibayar")}</span>` : `<span class="pill unpaid">Belum bayar</span>`}${o.printed ? `<span class="printed">✓ print ${o.printed}×</span>` : ""}<span class="time num">${tm(o.createdAt)} · ${ago(o.createdAt)}</span></div>
-    ${o.name || o.phone ? `<div class="who" style="font-weight:700;color:var(--fg)">${esc(o.name)}${o.phone ? " · " + esc(o.phone) : ""}</div>` : ""}
+  const ns = o.member ? memberFlags[o.uid] || 0 : 0;
+  return `<article class="ticket s-${o.status} ${late ? "late" : ""}">
+    <div class="hd"><span class="no num">#${pad3(o.no)}</span><span class="pill ${o.source === "pos" ? "pos" : o.type}">${o.source === "pos" ? "Kaunter" : "App · Takeaway"}</span>${o.member ? `<span class="pill mem">★ Ahli</span>` : ""}${o.paid ? `<span class="pill paid">✓ Dibayar · ${esc(PAY[o.payment?.method]?.short || "")}</span>` : `<span class="pill unpaid">Belum bayar</span>`}${o.printed ? `<span class="printed">✓ print ${o.printed}×</span>` : ""}<span class="time num">${tm(o.createdAt)} · ${ago(o.createdAt)}</span></div>
+    ${o.name || o.phone ? `<div class="who" style="font-weight:700;color:var(--fg)">${esc(o.name)}${o.phone ? " · " + esc(o.phone) : ""}${ns >= 2 ? ` <span class="pill unpaid">⚠ ${ns}× tak ambil sebelum ini</span>` : ""}</div>` : ""}
+    ${o.eta && ["new", "prep", "ready"].includes(o.status) ? `<div class="etaline ${late ? "late" : ""}">${o.status === "ready" ? `Siap ${waitMin} min lalu${!o.paid && waitMin >= QUEUE.pickupMin ? " · melepasi tempoh ambil" : ""}` : late ? `⏰ Lewat ${Math.floor((now - o.eta) / 60000)} min (janji ${tm(o.eta)})` : `Anggaran siap ${tm(o.eta)}`}${["new", "prep"].includes(o.status) ? ` <button class="mini" data-act="delay" data-id="${o.id}" ${L}>+5 min</button>` : ""}</div>` : ""}
     <ul>${o.items.map(i => `<li><b class="num">${i.qty}×</b><span>${esc(i.name)}</span>${i.opts.length || i.note ? `<small>${esc(i.opts.join(" · "))}${i.note ? ` · <b style="color:var(--new)">${esc(i.note)}</b>` : ""}</small>` : ""}${i.gift?.msg ? `<small class="giftline">♥ ${i.gift.to ? "Untuk " + esc(i.gift.to) + ": " : ""}“${esc(i.gift.msg)}”${i.gift.from ? " — " + esc(i.gift.from) : ""}</small>` : ""}</li>`).join("")}</ul>
     ${gifts ? `<div class="giftnote">♥ ${gifts} cawan ada ucapan. Sticker ucapan dicetak sekali.</div>` : ""}
+    ${!pc.ok ? `<div class="pricewarn">⚠ <b>Harga tak sepadan dengan menu.</b> Dihantar ${rm(o.total)}, sepatutnya <b>${rm(pc.total)}</b>.<br><small>${pc.issues.map(esc).join(" · ")}</small><br><small>Bayaran akan dikutip ikut harga menu.</small></div>` : ""}
+    ${o.priceFixed ? `<div class="vline"><span>Harga dibetulkan</span><span class="num">${rm(o.totalOriginal)} → ${rm(o.total)}</span></div>` : ""}
     ${o.discount ? `<div class="vline"><span>🎟 ${esc(o.voucherTitle || "Voucher")}</span><span class="num">Subtotal ${rm(o.subtotal)} · -${rm(o.discount)}</span></div>` : ""}
-    <div class="ft"><span class="tot num">${rm(o.total)}${o.member ? `<small class="ptsnote">+${pointsFor(o.total)} pt bila diambil</small>` : ""}</span>${btns}</div></article>`;
+    <div class="ft"><span class="tot num">${rm(pc.ok ? o.total : pc.total)}${o.member ? `<small class="ptsnote">+${pointsFor(pc.ok ? o.total : pc.total)} pt bila diambil</small>` : ""}</span>${btns}</div></article>`;
 }
 async function act(id, a) {
   const o = orders.find(x => x.id === id); if (!o) return;
   if (a === "labels") return queueLabels(o, false);
   if (!isOpen()) { toast("Buka shift dulu untuk urus order."); return; }
+  if (!online) { toast("Tiada internet. Tunggu sambungan pulih."); return; }
   try {
-    if (a === "accept") { await updateOrder(id, { status: "prep", prepAt: Date.now() }); queueLabels(o, true); }
+    if (a === "accept") { await updateOrder(id, { status: "prep", prepAt: Date.now() }); queueLabels(o, !o.printed); }
     else if (a === "ready") await updateOrder(id, { status: "ready", readyAt: Date.now() });
     else if (a === "back") await updateOrder(id, { status: "prep" });
-    else if (a === "pay") openPayment({ total: o.total, title: `Bayaran order #${pad3(o.no)}`, sub: o.name, onPaid: async p => { const g = await completeOrder(o, p, shift.shiftId); afterModal(); const ch = p.method === "cash" && p.change > 0 ? ` Baki: ${rm(p.change)}.` : ""; toast(g ? `Selesai.${ch} +${g} point untuk ${o.name}` : `Order #${pad3(o.no)} selesai.${ch}`); } });
-    else if (a === "done") { const g = await completeOrder(o, null, shift.shiftId); if (g) toast(`+${g} point diberi kepada ${o.name}`); }
-    else if (a === "cancel") { await cancelOrder(o); if (o.voucherId) toast("Order dibatal. Voucher dipulangkan kepada ahli."); }
-  } catch (e) { console.error(e); toast("Tak berjaya kemaskini. Cuba lagi."); }
+    else if (a === "delay") { await delayOrder(o, 5, by()); toast(`Anggaran #${pad3(o.no)} ditambah 5 minit. Pelanggan nampak masa baru.`); }
+    else if (a === "pay") {
+      const pc = priceCheck(o);
+      openPayment({ total: pc.ok ? o.total : pc.total, title: `Bayaran order #${pad3(o.no)}`, sub: o.name, fixNote: pc.ok ? "" : `Harga dibetulkan ikut menu: ${rm(o.total)} → ${rm(pc.total)}`,
+        onPaid: async p => {
+          await payOrder(o, p, shift.shiftId, by(), pc.ok ? null : { total: pc.total, note: pc.issues.join("; ") });
+          afterModal(); toast(`Bayaran #${pad3(o.no)} disahkan.${p.method === "cash" && p.change > 0 ? ` Baki: ${rm(p.change)}.` : ""}${o.status === "ready" ? " Tekan “Serah kepada pelanggan” bila diberi." : ""}`);
+        } });
+    }
+    else if (a === "collect") { const g = await collectOrder(o); toast(g ? `#${pad3(o.no)} diserahkan. +${g} point untuk ${o.name}.` : `#${pad3(o.no)} diserahkan.`); }
+    else if (a === "cancel") openCancel(o);
+    else if (a === "noshow") openNoShow(o);
+  } catch (e) { console.error(e); toast(e.message === "NOT_PAID" ? "Order belum dibayar. Terima bayaran dulu." : e.message === "ALREADY_PAID" ? "Order ini dah dibayar." : "Tak berjaya kemaskini. Cuba lagi."); }
+}
+const CANCEL_REASONS = ["Pelanggan minta batal", "Item habis", "Order berganda", "Salah order", "Outlet terlalu sibuk"];
+function openCancel(o) {
+  let reason = "", err = "";
+  const draw = () => {
+    const sh = openModal(`<h2>Batal order #${pad3(o.no)}</h2>
+      <div class="sub">${esc(o.name || "")} · ${rm(o.total)} · belum dibayar</div>
+      <div class="opt"><label class="t">Alasan (wajib)</label><div class="quick">${CANCEL_REASONS.map(r => `<button data-r="${esc(r)}" class="${reason === r ? "on" : ""}">${esc(r)}</button>`).join("")}</div></div>
+      <label class="field"><span>Atau tulis alasan</span><input type="text" id="cR" maxlength="80" value="${esc(reason)}"></label>
+      <p class="muted">Pembatalan direkod bersama nama staff dan masa. ${o.voucherId ? "Voucher ahli akan dipulangkan." : ""}</p>
+      ${err ? `<div class="err">${esc(err)}</div>` : ""}
+      <div class="sheet-foot"><button class="btn ghost" id="cX">Kembali</button><button class="btn" style="background:var(--new);color:#fff" id="cOk">Batalkan order</button></div>`);
+    sh.querySelectorAll("[data-r]").forEach(b => b.onclick = () => { reason = b.dataset.r; draw(); });
+    $("#cX").onclick = afterModal;
+    $("#cOk").onclick = async () => {
+      reason = $("#cR").value.trim();
+      if (reason.length < 3) { err = "Sila pilih atau tulis alasan pembatalan."; draw(); return; }
+      try { await cancelOrder(o, reason, by()); afterModal(); toast(`Order #${pad3(o.no)} dibatalkan.`); }
+      catch (e) { err = e.message === "PAID_NEEDS_REFUND" ? "Order dah dibayar. Hanya admin boleh buat refund." : "Tak berjaya batal."; draw(); }
+    };
+  };
+  draw();
+}
+function openNoShow(o) {
+  openModal(`<h2>Tanda tak datang ambil?</h2>
+    <p>Order <b>#${pad3(o.no)}</b> (${esc(o.name || "")}) siap ${Math.floor((Date.now() - o.readyAt) / 60000)} minit lalu dan belum dibayar.</p>
+    <p class="muted">Order direkod sebagai "Tak datang ambil". ${o.member ? "Rekod ini disimpan pada akaun ahli untuk rujukan (tiada denda). " : ""}${o.voucherId ? "Voucher dipulangkan." : ""}</p>
+    <div class="sheet-foot"><button class="btn ghost" id="nX">Kembali</button><button class="btn" id="nOk">Ya, tanda tak datang</button></div>`);
+  $("#nX").onclick = afterModal;
+  $("#nOk").onclick = async () => { try { await markNoShow(o, by()); afterModal(); toast(`#${pad3(o.no)} ditanda tak datang ambil.`); } catch (e) { toast("Tak berjaya kemaskini."); } };
 }
 
 /* ================= BAYARAN ================= */
-function openPayment({ total, title, sub, onPaid, onBack }) {
-  let method = "cash", tendered = "", ref = "", err = "", busy = false;
+function openPayment({ total, title, sub, onPaid, onBack, fixNote }) {
+  let method = "cash", tendered = "", ref = "", verified = false, err = "", busy = false;
   const draw = () => {
     const t = num(tendered), change = method === "cash" && !isNaN(t) ? r2(t - total) : 0;
     const sh = openModal(`
       <h2>${esc(title)}</h2>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}
       <div class="pay-total"><span>Jumlah perlu dibayar</span><b class="num">${rm(total)}</b></div>
+      ${fixNote ? `<div class="pricewarn">${esc(fixNote)}</div>` : ""}
       <div class="opt"><label class="t">Cara bayaran</label><div class="paygrid">
         ${PAYMENTS.map(p => `<button data-m="${p.id}" aria-pressed="${method === p.id}"><span class="pi">${p.id === "cash" ? "💵" : p.id === "qr" ? "▦" : "💳"}</span>${esc(p.label)}</button>`).join("")}</div></div>
       ${method === "cash" ? `
         <label class="field"><span>Tunai diterima (RM)</span><input type="text" inputmode="decimal" id="pT" value="${esc(tendered)}" placeholder="${total.toFixed(2)}"></label>
         <div class="quick"><button data-t="${total.toFixed(2)}">Tepat</button>${[5, 10, 20, 50, 100].filter(v => v > total).slice(0, 4).map(v => `<button data-t="${v}">RM${v}</button>`).join("")}</div>
         <div class="change ${change < 0 ? "short" : ""}"><span>${change < 0 ? "Tak cukup" : "Baki untuk pelanggan"}</span><b class="num">${tendered === "" ? "-" : rm(Math.abs(change))}</b></div>`
-      : `<label class="field"><span>No. rujukan / 4 digit akhir (pilihan)</span><input type="text" id="pR" maxlength="30" value="${esc(ref)}"></label>
-         <div class="hint">${method === "qr" ? "Pastikan notifikasi bayaran QR dah masuk sebelum tekan Sahkan." : "Pastikan terminal kad tunjuk bayaran berjaya sebelum tekan Sahkan."}</div>`}
+      : `<label class="field"><span>${method === "qr" ? "No. rujukan transaksi (dari app bank / merchant)" : "No. approval / 4 digit akhir kad"} <b style="color:var(--new)">wajib</b></span><input type="text" id="pR" maxlength="30" value="${esc(ref)}" placeholder="Sekurang-kurangnya 4 aksara"></label>
+         <label class="verify"><input type="checkbox" id="pV" ${verified ? "checked" : ""}> ${method === "qr" ? "Saya dah semak <b>bayaran masuk dalam app bank / merchant outlet</b>. Saya tak bergantung pada screenshot pelanggan sahaja." : "Terminal kad tunjuk <b>APPROVED / berjaya</b> dan resit terminal dah keluar."}</label>
+         <p class="muted">Disahkan oleh: <b>${esc(by())}</b> · ${tm(Date.now())}</p>`}
       ${err ? `<div class="err">${esc(err)}</div>` : ""}
       <div class="sheet-foot"><button class="btn ghost" id="pBack">${onBack ? "Kembali" : "Batal"}</button><button class="btn wide" id="pOk" ${busy ? "disabled" : ""}><span>${busy ? "Menyimpan…" : "Sahkan bayaran"}</span><span class="num">${rm(total)}</span></button></div>`,
       { onClose: () => onBack ? onBack() : afterModal() });
-    const keep = () => { const a = $("#pT"), b = $("#pR"); if (a) tendered = a.value.trim(); if (b) ref = b.value.trim(); };
+    const keep = () => { const a = $("#pT"), b = $("#pR"), c = $("#pV"); if (a) tendered = a.value.trim(); if (b) ref = b.value.trim(); if (c) verified = c.checked; };
     sh.querySelectorAll("[data-m]").forEach(b => b.onclick = () => { keep(); method = b.dataset.m; err = ""; draw(); });
     sh.querySelectorAll("[data-t]").forEach(b => b.onclick = () => { keep(); tendered = b.dataset.t; err = ""; draw(); });
     const pt = $("#pT"); if (pt) { pt.oninput = () => { tendered = pt.value.trim(); const t2 = num(tendered), ch = r2(t2 - total); const box = sh.querySelector(".change"); box.classList.toggle("short", ch < 0); box.querySelector("span").textContent = ch < 0 ? "Tak cukup" : "Baki untuk pelanggan"; box.querySelector("b").textContent = isNaN(t2) ? "-" : rm(Math.abs(ch)); }; pt.focus(); }
@@ -292,10 +377,15 @@ function openPayment({ total, title, sub, onPaid, onBack }) {
         const t2 = tendered === "" ? total : num(tendered);
         if (isNaN(t2) || t2 < total) { err = "Tunai diterima kurang daripada jumlah."; draw(); return; }
         p = { method, amount: total, tendered: t2, change: r2(t2 - total), ref: "" };
-      } else p = { method, amount: total, tendered: total, change: 0, ref };
+      } else {
+        if (ref.length < 4) { err = "Masukkan no. rujukan / approval (sekurang-kurangnya 4 aksara)."; draw(); return; }
+        if (!verified) { err = method === "qr" ? "Sila semak dan tandakan bahawa bayaran QR dah masuk dalam app bank." : "Sila sahkan terminal kad tunjuk bayaran berjaya."; draw(); return; }
+        p = { method, amount: total, tendered: total, change: 0, ref };
+      }
+      p.verifiedBy = by();
       busy = true; draw();
       try { await onPaid(p); }
-      catch (e) { console.error(e); busy = false; err = e.message === "SHIFT_CLOSED" ? "Shift dah ditutup. Buka shift dulu." : "Tak berjaya simpan bayaran. Cuba lagi."; draw(); }
+      catch (e) { console.error(e); busy = false; err = e.message === "SHIFT_CLOSED" ? "Shift dah ditutup. Buka shift dulu." : e.message === "ALREADY_PAID" ? "Order ini dah dibayar dari peranti lain." : "Tak berjaya simpan bayaran. Semak internet dan cuba lagi."; draw(); }
     };
   };
   draw();
@@ -401,6 +491,16 @@ async function openEndShift() {
   let sum;
   try { sum = await shiftSummary(shift); } catch (e) { sh0.innerHTML = `<h2>Tutup shift</h2><div class="err">Tak dapat kira jualan. Semak internet dan cuba lagi.</div><div class="sheet-foot"><button class="btn ghost" id="x">Tutup</button></div>`; $("#x").onclick = afterModal; return; }
   const pending = orders.filter(o => ["new", "prep", "ready"].includes(o.status));
+  const since = o => (t => t && t >= shift.openedAt)(o);
+  const ex = {
+    pending: pending.map(o => ({ no: o.no, status: o.status, paid: !!o.paid, total: o.total, name: o.name || "" })),
+    paidNotCollected: pending.filter(o => o.paid).length,
+    cancelled: orders.filter(o => o.status === "cancel" && since(o.cancelAt)).map(o => ({ no: o.no, total: o.total, reason: o.cancelReason || "" })),
+    noshow: orders.filter(o => o.status === "noshow" && since(o.noshowAt)).map(o => ({ no: o.no, total: o.total })),
+    priceFixed: orders.filter(o => o.priceFixed && o.shiftId === shift.shiftId).map(o => ({ no: o.no, from: o.totalOriginal, to: o.total })),
+    reprints: orders.filter(o => (o.printed || 0) > 1).map(o => ({ no: o.no, times: o.printed })),
+    refunds: sum.refunds || [],
+  };
   let counted = "", note = "", err = "", busy = false, confirmPending = false;
   const draw = () => {
     const c = num(counted), diff = isNaN(c) ? null : r2(c - sum.expectedCash);
@@ -415,10 +515,19 @@ async function openEndShift() {
         <div><span>Order dibayar</span><b class="num">${sum.orderCount} <small>(${sum.appCount} app · ${sum.posCount} kaunter)</small></b></div>
         <div class="hl gold"><span>Tunai sepatutnya dalam laci</span><b class="num">${rm(sum.expectedCash)}</b></div>
       </div>
-      ${pending.length ? `<div class="warnbox">⚠ Masih ada <b>${pending.length} order</b> belum selesai (${pending.map(o => "#" + pad3(o.no)).join(", ")}). Order yang belum dibayar tak dikira dalam shift ini.</div>` : ""}
+      ${sum.refundCash ? `<div class="vline"><span>Refund tunai dalam shift ini</span><span class="num">-${rm(sum.refundCash)}</span></div>` : ""}
+      <div class="exrep"><h3>Laporan pengecualian</h3>
+        ${pending.length ? `<div class="warnbox">⚠ <b>${pending.length} order belum selesai:</b><br>${pending.map(o => `#${pad3(o.no)} ${esc(o.name || "")} · ${ST[o.status]} · ${o.paid ? "<b>DAH BAYAR, belum diserah</b>" : "belum bayar"} · ${rm(o.total)}`).join("<br>")}<br><small>Order belum bayar tak dikira dalam shift ini dan akan kekal untuk shift seterusnya. Selesaikan dulu jika boleh.</small></div>` : `<p class="okline">✓ Tiada order tergantung.</p>`}
+        <ul class="exlist">
+          <li>Batal: <b>${ex.cancelled.length}</b>${ex.cancelled.length ? " · " + ex.cancelled.map(c => `#${pad3(c.no)} (${esc(c.reason)})`).join(", ") : ""}</li>
+          <li>Tak datang ambil: <b>${ex.noshow.length}</b>${ex.noshow.length ? " · " + ex.noshow.map(c => "#" + pad3(c.no)).join(", ") : ""}</li>
+          <li>Harga dibetulkan: <b>${ex.priceFixed.length}</b>${ex.priceFixed.length ? " · " + ex.priceFixed.map(c => `#${pad3(c.no)} ${rm(c.from)}→${rm(c.to)}`).join(", ") : ""}</li>
+          <li>Refund oleh admin: <b>${ex.refunds.length}</b></li>
+          <li>Sticker dicetak lebih sekali: <b>${ex.reprints.length}</b>${ex.reprints.length ? " · " + ex.reprints.map(c => `#${pad3(c.no)} (${c.times}×)`).join(", ") : ""}</li>
+        </ul></div>
       <label class="field"><span>Kira tunai dalam laci sekarang (RM)</span><input type="text" inputmode="decimal" id="cC" value="${esc(counted)}" placeholder="${sum.expectedCash.toFixed(2)}"></label>
       <div class="change ${diff == null ? "" : diff < 0 ? "short" : diff > 0 ? "over" : "ok"}" id="cDiff"><span>${diff == null ? "Beza" : diff === 0 ? "Tepat, tiada beza" : diff < 0 ? "Kurang" : "Lebih"}</span><b class="num">${diff == null ? "-" : rm(Math.abs(diff))}</b></div>
-      <label class="field"><span>Catatan (pilihan)</span><input type="text" id="cN" maxlength="120" value="${esc(note)}" placeholder="Cth: RM5 untuk beli ais"></label>
+      <label class="field"><span>Catatan ${diff || pending.length ? `<b style="color:var(--new)">wajib (ada beza tunai / order tergantung)</b>` : "(pilihan)"}</span><input type="text" id="cN" maxlength="160" value="${esc(note)}" placeholder="Cth: RM5 untuk beli ais; #012 pelanggan datang esok"></label>
       ${err ? `<div class="err">${esc(err)}</div>` : ""}
       <div class="sheet-foot"><button class="btn ghost" id="cBack">Batal</button><button class="btn wide" id="cOk" ${busy ? "disabled" : ""}><span>${busy ? "Menutup…" : confirmPending ? "Ya, tutup juga" : "Tutup shift"}</span><span>→</span></button></div>`);
     const keep = () => { counted = $("#cC").value.trim(); note = $("#cN").value.trim(); };
@@ -428,10 +537,12 @@ async function openEndShift() {
       keep();
       const cc = num(counted);
       if (isNaN(cc) || cc < 0) { err = "Sila masukkan jumlah tunai yang dikira dalam laci."; draw(); return; }
+      const dd = r2(cc - sum.expectedCash);
+      if ((dd !== 0 || pending.length) && note.length < 3) { err = "Sila tulis catatan untuk beza tunai atau order yang belum selesai."; draw(); return; }
       if (pending.length && !confirmPending) { confirmPending = true; err = ""; draw(); return; }
       busy = true; draw();
       try {
-        const res = await closeShift(shift, { countedCash: cc, note, email: staffEmail });
+        const res = await closeShift(shift, { countedCash: cc, note, email: staffEmail, exceptions: ex });
         showShiftReport(res);
       } catch (e) { console.error(e); busy = false; err = "Tak berjaya tutup shift. Cuba lagi."; draw(); }
     };
@@ -484,6 +595,7 @@ function labelHTML(o, { i, n, total }) {
 }
 let queue = [];
 function queueLabels(o, print) {
+  o = orders.find(x => x.id === o.id) || o;
   if (queue.some(q => q.o.id === o.id)) return;
   queue.push({ o, print });
   if (!$("#modal").innerHTML) nextLabels();
@@ -496,17 +608,19 @@ function nextLabels() {
   const sh = openModal(`<h2>Sticker order #${pad3(o.no)}</h2>
     <div class="sub">${count} sticker · ${LABEL.width}×${LABEL.height}mm · satu sticker untuk setiap cawan${count > L.length ? ", berserta sticker ucapan" : ""}.</div>
     <div class="lbl-preview">${html || `<p class="muted">Tiada item untuk dicetak.</p>`}</div>
-    <div class="sheet-foot" style="flex-wrap:wrap"><button class="btn ghost" id="dClose">Tutup</button><button class="btn wide" id="dPrint" ${count ? "" : "disabled"}><span>Print sticker</span><span>⎙</span></button></div>`,
+    ${o.printed ? `<div class="warnbox">Sticker order ini <b>dah dicetak ${o.printed} kali</b>. Cetak semula hanya jika sticker rosak atau hilang.</div>` : ""}
+    <div class="sheet-foot" style="flex-wrap:wrap"><button class="btn ghost" id="dClose">Tutup</button><button class="btn wide" id="dPrint" ${count ? "" : "disabled"}><span>${o.printed ? "Cetak semula" : "Print sticker"}</span><span>⎙</span></button></div>`,
     { onClose: () => { closeModal(); nextLabels(); } });
   $("#dClose").onclick = () => { closeModal(); nextLabels(); };
   $("#dPrint").onclick = () => doPrint(o, html);
-  if (print && count) setTimeout(() => doPrint(o, html), 300);
+  if (print && count && !o.printed) setTimeout(() => doPrint(o, html), 300);
 }
 function doPrint(o, html) {
   $("#printArea").innerHTML = html;
   window.print();
-  const cur = orders.find(x => x.id === o.id);
-  updateOrder(o.id, { printed: (cur?.printed || o.printed || 0) + 1 }).catch(() => {});
+  const cur = orders.find(x => x.id === o.id), n = (cur?.printed || o.printed || 0);
+  updateOrder(o.id, { printed: n + 1 }).catch(() => {});
+  if (n >= 1) logAudit(by(), "reprint", { orderId: o.id, no: o.no, detail: `Cetakan ke-${n + 1}` });
   setTimeout(() => { closeModal(); nextLabels(); }, 400);
 }
 

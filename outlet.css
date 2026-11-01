@@ -111,3 +111,21 @@ td.neg{color:var(--new);font-weight:700} td.pos{color:var(--ready);font-weight:7
 .stock-it:disabled{opacity:.6;cursor:not-allowed}
 .pos-grid button.so{opacity:.45;cursor:not-allowed}
 .field input[type=password],.field input[type=email],.field input[type=search]{width:100%;font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+
+/* v7: kawalan operasi */
+.offline{margin-top:12px;background:var(--new);color:#fff;border-radius:12px;padding:10px 14px;font-weight:700;font-size:14px}
+.tgl.warn{border-color:var(--new);background:var(--new-bg)}
+.tgl.warn i{background:var(--new)}
+.qline{margin:-4px 0 8px;font-size:13px}
+.ticket.late{border-left-color:var(--new);box-shadow:0 0 0 2px var(--new-bg)}
+.etaline{font-size:12.5px;font-weight:700;color:var(--muted);margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.etaline.late{color:var(--new)}
+.etaline .mini{border:1px solid var(--line);background:var(--bg);border-radius:999px;padding:2px 10px;font-size:12px;font-weight:700}
+.pricewarn{background:#fff1e6;border:1px solid #f0b48a;color:#7a3e12;border-radius:10px;padding:8px 10px;font-size:13px;margin:8px 0}
+.quick button.on{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+.verify{display:flex;gap:10px;align-items:flex-start;background:var(--ready-bg);border-radius:10px;padding:10px 12px;margin-top:10px;font-size:13.5px;line-height:1.4}
+.verify input{width:20px;height:20px;flex:none;accent-color:var(--accent);margin-top:1px}
+.exrep{border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin:10px 0}
+.exrep h3{margin:0 0 6px;font-size:14px;font-family:var(--f-display)}
+.exlist{margin:6px 0 0;padding-left:18px;font-size:13px}
+.okline{color:var(--ready);font-weight:700;font-size:13.5px;margin:4px 0}
