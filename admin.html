@@ -132,10 +132,13 @@ function applyRange(k) {
   else if (k === "lmonth") { range.from = ymd(new Date(d.getFullYear(), d.getMonth() - 1, 1)); range.to = ymd(new Date(d.getFullYear(), d.getMonth(), 0)); }
 }
 function rangeBar() {
+  // Date-range values are sourced from DOM inputs; validate before HTML interpolation.
+  const safeDate = value => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(parseYmd(value).getTime()) ? value : today();
+  const from = safeDate(range.from), to = safeDate(range.to);
   return `<div class="rangebar">
     <div class="chips">${RANGES.map(([k, l]) => `<button data-r="${k}" aria-pressed="${range.key === k}">${l}</button>`).join("")}</div>
-    <div class="rb-dates"><label>Dari <input type="date" id="rFrom" value="${range.from}" max="${today()}"></label><label>Hingga <input type="date" id="rTo" value="${range.to}" max="${today()}"></label>
-    <span class="muted">${fmtDay(range.from)}${range.from !== range.to ? " – " + fmtDay(range.to) : ""} · ${daysBetween(range.from, range.to)} hari</span></div>
+    <div class="rb-dates"><label>Dari <input type="date" id="rFrom" value="${esc(from)}" max="${today()}"></label><label>Hingga <input type="date" id="rTo" value="${esc(to)}" max="${today()}"></label>
+    <span class="muted">${esc(fmtDay(from))}${from !== to ? " – " + esc(fmtDay(to)) : ""} · ${daysBetween(from, to)} hari</span></div>
   </div>`;
 }
 function bindRange(after) {
